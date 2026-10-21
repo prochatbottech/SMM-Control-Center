@@ -919,6 +919,37 @@ pub async fn mark_dead_leads_as_cold(pool: &SqlitePool, days: i64) -> Result<u64
     Ok(result.rows_affected())
 }
 
+/// Aggregated funnel metrics directly from SQLite
+/// Invariant: Single aggregation query with COALESCE and zero-division protection
+pub async fn get_funnel_metrics(pool: &SqlitePool) -> Result<crate::analytics::FunnelMetrics, String> {
+    let row = sqlx::query_as::<_, (i64, i64, i64, i64, i64)>(
+        r#"
+        SELECT
+            COALESCE(COUNT(*), 0) AS total_leads,
+            COALESCE(SUM(CASE WHEN funnel_stage = 'request_sent' THEN 1 ELSE 0 END), 0) AS requests_sent,
+            COALESCE(SUM(CASE WHEN funnel_stage LIKE 'aida_%' OR funnel_stage LIKE 'spin_%' OR funnel_stage = 'request_accepted' THEN 1 ELSE 0 END), 0) AS dialogs_active,
+            COALESCE(SUM(CASE WHEN funnel_stage = 'closed' THEN 1 ELSE 0 END), 0) AS closed,
+            COALESCE(SUM(CASE WHEN funnel_stage = 'cold' THEN 1 ELSE 0 END), 0) AS cold
+        FROM leads
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Failed to aggregate funnel metrics: {}", e))?;
+
+    let (total_leads, requests_sent, dialogs_active, closed, cold) = row;
+    let conversion_rate = crate::analytics::FunnelMetrics::calculate_conversion_rate(total_leads, closed);
+
+    Ok(crate::analytics::FunnelMetrics {
+        total_leads,
+        requests_sent,
+        dialogs_active,
+        closed,
+        cold,
+        conversion_rate,
+    })
+}
+
 // ==========================================
 // Automation Queue Operations
 // ==========================================

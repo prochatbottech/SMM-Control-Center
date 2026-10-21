@@ -1,3 +1,4 @@
+pub mod analytics;
 pub mod automation_worker;
 pub mod commands;
 pub mod crm;
@@ -173,7 +174,8 @@ pub fn run() {
             crm::delete_queue_item,
             crm::mark_dead_leads,
             crm::generate_funnel_message,
-            crm::generate_and_schedule_message
+            crm::generate_and_schedule_message,
+            analytics::get_funnel_analytics
         ]);
 
     #[allow(unused_mut)]

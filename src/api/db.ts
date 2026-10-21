@@ -514,3 +514,21 @@ export async function generateAndScheduleMessage(
   });
 }
 
+// ============================================================================
+// Funnel Analytics API
+// ============================================================================
+
+export interface FunnelMetrics {
+  total_leads: number;
+  requests_sent: number;
+  dialogs_active: number;
+  closed: number;
+  cold: number;
+  conversion_rate: number;
+}
+
+export async function getFunnelAnalytics(): Promise<FunnelMetrics> {
+  return await safeInvoke<FunnelMetrics>('get_funnel_analytics');
+}
+
+
