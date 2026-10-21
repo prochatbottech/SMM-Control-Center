@@ -15,6 +15,7 @@ import {
   Undo2,
   Bot,
   Settings,
+  UserCheck,
 } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useAccountsQuery } from '../hooks/useAccounts';
@@ -51,6 +52,7 @@ export const CreatePostForm: React.FC<CreatePostFormProps> = ({
   const [aiInstruction, setAiInstruction] = useState<string>(
     'Исправить ошибки и стиль, сделать текст более вовлекающим и добавить эмодзи'
   );
+  const [applyHumanizer, setApplyHumanizer] = useState<boolean>(true);
   const [isGeneratingAI, setIsGeneratingAI] = useState(false);
   const [previousContent, setPreviousContent] = useState<string | null>(null);
 
@@ -112,7 +114,8 @@ export const CreatePostForm: React.FC<CreatePostFormProps> = ({
         content,
         aiInstruction,
         aiModel.trim(),
-        selectedCredentialId
+        selectedCredentialId,
+        applyHumanizer
       );
       setPreviousContent(original);
       setContent(rewritten);
@@ -562,13 +565,35 @@ export const CreatePostForm: React.FC<CreatePostFormProps> = ({
               />
             </div>
 
-            {/* AI Action button */}
-            <div className="flex items-center justify-end pt-1">
+            {/* Humanizer switch & AI Action button */}
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-purple-500/15">
+              <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                <div className="relative inline-flex items-center">
+                  <input
+                    type="checkbox"
+                    checked={applyHumanizer}
+                    onChange={(e) => setApplyHumanizer(e.target.checked)}
+                    disabled={isGeneratingAI}
+                    className="sr-only peer"
+                  />
+                  <div className="w-9 h-5 bg-zinc-200 peer-focus:outline-hidden rounded-full peer dark:bg-zinc-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all dark:border-zinc-600 peer-checked:bg-purple-600"></div>
+                </div>
+                <div>
+                  <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
+                    <UserCheck className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />
+                    Очеловечить текст (Humanizer)
+                  </span>
+                  <span className="text-[10px] text-zinc-500 dark:text-zinc-400 block">
+                    Burstiness, Perplexity и бан стоп-слов ИИ для обхода детекторов
+                  </span>
+                </div>
+              </label>
+
               <button
                 type="button"
                 onClick={handleGenerateRewrite}
                 disabled={isGeneratingAI || !content.trim()}
-                className="inline-flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white rounded-xl text-xs font-bold shadow-md shadow-purple-500/20 disabled:opacity-50 transition-all cursor-pointer"
+                className="inline-flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white rounded-xl text-xs font-bold shadow-md shadow-purple-500/20 disabled:opacity-50 transition-all cursor-pointer ml-auto"
               >
                 {isGeneratingAI ? (
                   <Loader2 className="w-4 h-4 animate-spin" />

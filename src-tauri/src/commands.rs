@@ -201,8 +201,33 @@ pub async fn delete_api_credential(
     }))
 }
 
+pub const HUMANIZER_PROMPT: &str = "HUMANIZATION RULES: \n\
+1. High Burstiness: чередуй короткие (3-5 слов) и длинные (15-20 слов) предложения.\n\
+2. High Perplexity: используй непредсказуемую, живую лексику. \n\
+3. Banned Words: категорически запрещено использовать слова-маркеры ИИ (delve, tapestry, testament, moreover, furthermore, beacon, crucial, 'в заключение', 'важно отметить'). \n\
+4. Тон: пиши как живой человек, допускай легкую неформальность, избегай роботизированного академического стиля.";
+
+/// Helper to assemble the structured system prompt according to routing invariants:
+/// [СИСТЕМНАЯ РОЛЬ] -> [HUMANIZATION RULES (если true)] -> [ЗАДАЧА ПОЛЬЗОВАТЕЛЯ: {prompt_instruction}]
+pub fn build_rewrite_system_prompt(prompt_instruction: &str, apply_humanizer: bool) -> String {
+    let mut parts = vec![
+        "Ты профессиональный SMM-копирайтер. Твоя задача — улучшить или переписать предоставленный текст по инструкции пользователя. Сохраняй факты, не добавляй отсебятины и не веди диалог (возвращай ТОЛЬКО финальный текст поста).".to_string()
+    ];
+
+    if apply_humanizer {
+        parts.push(HUMANIZER_PROMPT.to_string());
+    }
+
+    let instruction = prompt_instruction.trim();
+    if !instruction.is_empty() {
+        parts.push(format!("ЗАДАЧА ПОЛЬЗОВАТЕЛЯ: {}", instruction));
+    }
+
+    parts.join("\n\n")
+}
+
 /// Tauri Command: Generate AI Rewrite for post text
-/// Invariant: Memory safety (zeroize decrypted key), error redaction, meta-prompt enforcement.
+/// Invariant: Memory safety (zeroize decrypted key), error redaction, meta-prompt enforcement, Humanizer rules.
 #[tauri::command]
 pub async fn generate_ai_rewrite(
     state: State<'_, DbState>,
@@ -210,6 +235,7 @@ pub async fn generate_ai_rewrite(
     prompt_instruction: String,
     model_name: String,
     credential_id: String,
+    apply_humanizer: Option<bool>,
 ) -> Result<String, String> {
     let user_text = text.trim();
     if user_text.is_empty() {
@@ -231,13 +257,9 @@ pub async fn generate_ai_rewrite(
         .map_err(|e| format!("Failed to decrypt API key: {}", e))?;
     let raw_key = Zeroizing::new(decrypted);
 
-    // 3. System meta-prompt
-    let base_meta_prompt = "Ты профессиональный SMM-копирайтер. Твоя задача — улучшить или переписать предоставленный текст по инструкции пользователя. Сохраняй факты, не добавляй отсебятины и не веди диалог (возвращай ТОЛЬКО финальный текст поста).";
-    let sys_prompt = if prompt_instruction.trim().is_empty() {
-        base_meta_prompt.to_string()
-    } else {
-        format!("{}\nИнструкция: {}", base_meta_prompt, prompt_instruction.trim())
-    };
+    // 3. Assemble system prompt with Humanizer rules if requested
+    let humanize = apply_humanizer.unwrap_or(false);
+    let sys_prompt = build_rewrite_system_prompt(&prompt_instruction, humanize);
 
     // 4. Invoke LLM Gateway
     llm_gateway::send_completion(

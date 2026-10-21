@@ -713,4 +713,27 @@ mod tests {
         assert_eq!(models::mask_api_key("1234567"), "***");
         assert_eq!(models::mask_api_key("12345678"), "123...5678");
     }
+
+    #[test]
+    fn test_humanizer_prompt_assembly() {
+        // 1. Without humanizer
+        let prompt_plain = commands::build_rewrite_system_prompt("Сделай короче", false);
+        assert!(prompt_plain.contains("Ты профессиональный SMM-копирайтер"));
+        assert!(prompt_plain.contains("ЗАДАЧА ПОЛЬЗОВАТЕЛЯ: Сделай короче"));
+        assert!(!prompt_plain.contains("HUMANIZATION RULES"));
+
+        // 2. With humanizer: invariant order [СИСТЕМНАЯ РОЛЬ] -> [HUMANIZATION RULES] -> [ЗАДАЧА ПОЛЬЗОВАТЕЛЯ]
+        let prompt_humanized = commands::build_rewrite_system_prompt("Сделай короче", true);
+        assert!(prompt_humanized.contains("HUMANIZATION RULES"));
+        assert!(prompt_humanized.contains("High Burstiness"));
+        assert!(prompt_humanized.contains("High Perplexity"));
+        assert!(prompt_humanized.contains("Banned Words"));
+
+        let role_pos = prompt_humanized.find("Ты профессиональный SMM-копирайтер").unwrap();
+        let humanizer_pos = prompt_humanized.find("HUMANIZATION RULES").unwrap();
+        let task_pos = prompt_humanized.find("ЗАДАЧА ПОЛЬЗОВАТЕЛЯ").unwrap();
+
+        assert!(role_pos < humanizer_pos, "Role must come before Humanizer rules");
+        assert!(humanizer_pos < task_pos, "Humanizer rules must come before user task");
+    }
 }

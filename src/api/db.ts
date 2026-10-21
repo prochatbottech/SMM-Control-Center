@@ -327,18 +327,21 @@ export async function deleteApiCredential(id: string): Promise<DeleteResult> {
  * @param promptInstruction User instruction (e.g. "Make it more engaging with emojis")
  * @param modelName Target model identifier (e.g. "gpt-4o-mini", "claude-3-5-sonnet-20241022")
  * @param credentialId ID of the credential to use
+ * @param applyHumanizer Whether to apply Humanizer burstiness & perplexity anti-AI detection rules
  * @returns Rewritten text from the LLM
  */
 export async function generateAiRewrite(
   text: string,
   promptInstruction: string,
   modelName: string,
-  credentialId: string
+  credentialId: string,
+  applyHumanizer?: boolean
 ): Promise<string> {
   return await safeInvoke<string>('generate_ai_rewrite', {
     text,
     promptInstruction,
     modelName,
     credentialId,
+    applyHumanizer: applyHumanizer ?? false,
   });
 }
