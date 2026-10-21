@@ -459,3 +459,58 @@ export async function markDeadLeads(
 ): Promise<{ marked_cold_count: number; days: number }> {
   return await safeInvoke('mark_dead_leads', { days });
 }
+
+// ============================================================================
+// AI Funnel Message Generator API (AIDA / SPIN)
+// ============================================================================
+
+export interface GenerateFunnelMessageInput {
+  leadId: string;
+  credentialId: string;
+  framework: 'aida' | 'spin' | string;
+  stage: string;
+  customContext: string;
+  applyHumanizer: boolean;
+  modelName?: string;
+}
+
+export interface GenerateAndScheduleMessageInput {
+  leadId: string;
+  accountId: string;
+  credentialId: string;
+  framework: 'aida' | 'spin' | string;
+  stage: string;
+  customContext: string;
+  applyHumanizer: boolean;
+  modelName?: string;
+}
+
+export async function generateFunnelMessage(
+  input: GenerateFunnelMessageInput
+): Promise<string> {
+  return await safeInvoke<string>('generate_funnel_message', {
+    leadId: input.leadId,
+    credentialId: input.credentialId,
+    framework: input.framework,
+    stage: input.stage,
+    customContext: input.customContext,
+    applyHumanizer: input.applyHumanizer,
+    modelName: input.modelName,
+  });
+}
+
+export async function generateAndScheduleMessage(
+  input: GenerateAndScheduleMessageInput
+): Promise<void> {
+  return await safeInvoke<void>('generate_and_schedule_message', {
+    leadId: input.leadId,
+    accountId: input.accountId,
+    credentialId: input.credentialId,
+    framework: input.framework,
+    stage: input.stage,
+    customContext: input.customContext,
+    applyHumanizer: input.applyHumanizer,
+    modelName: input.modelName,
+  });
+}
+

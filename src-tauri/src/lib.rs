@@ -3,6 +3,7 @@ pub mod commands;
 pub mod crm;
 pub mod crypto;
 pub mod db;
+pub mod funnel_prompts;
 pub mod llm_gateway;
 pub mod logger;
 pub mod models;
@@ -169,7 +170,9 @@ pub fn run() {
             crm::schedule_action,
             crm::get_automation_queue,
             crm::delete_queue_item,
-            crm::mark_dead_leads
+            crm::mark_dead_leads,
+            crm::generate_funnel_message,
+            crm::generate_and_schedule_message
         ]);
 
     #[allow(unused_mut)]

@@ -8,11 +8,15 @@ import {
   getAutomationQueue,
   deleteQueueItem,
   markDeadLeads,
+  generateFunnelMessage,
+  generateAndScheduleMessage,
   Lead,
   CreateLeadInput,
   EnrichedAutomationQueueItem,
   ScheduleActionInput,
   DeleteResult,
+  GenerateFunnelMessageInput,
+  GenerateAndScheduleMessageInput,
 } from '../api/db';
 
 export const LEADS_QUERY_KEY = ['leads'] as const;
@@ -120,3 +124,26 @@ export function useMarkDeadLeadsMutation() {
     },
   });
 }
+
+export function useGenerateFunnelMessageMutation() {
+  return useMutation<string, Error, GenerateFunnelMessageInput>({
+    mutationFn: async (input: GenerateFunnelMessageInput) => {
+      return await generateFunnelMessage(input);
+    },
+  });
+}
+
+export function useGenerateAndScheduleMessageMutation() {
+  const queryClient = useQueryClient();
+
+  return useMutation<void, Error, GenerateAndScheduleMessageInput>({
+    mutationFn: async (input: GenerateAndScheduleMessageInput) => {
+      return await generateAndScheduleMessage(input);
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: AUTOMATION_QUEUE_QUERY_KEY });
+      await queryClient.invalidateQueries({ queryKey: LEADS_QUERY_KEY });
+    },
+  });
+}
+

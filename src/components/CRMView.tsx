@@ -13,6 +13,9 @@ import {
   Activity,
   Bot,
   X,
+  Copy,
+  Check,
+  BrainCircuit,
 } from 'lucide-react';
 import {
   useLeadsQuery,
@@ -23,8 +26,11 @@ import {
   useScheduleActionMutation,
   useDeleteQueueItemMutation,
   useMarkDeadLeadsMutation,
+  useGenerateFunnelMessageMutation,
+  useGenerateAndScheduleMessageMutation,
 } from '../hooks/useCRM';
 import { useAccountsQuery } from '../hooks/useAccounts';
+import { useApiCredentialsQuery } from '../hooks/useApiCredentials';
 import { Lead, Platform, ActionType, FunnelStage } from '../api/db';
 import { toast } from 'sonner';
 
@@ -42,6 +48,7 @@ export const CRMView: React.FC = () => {
   const { data: leads, isLoading: isLeadsLoading } = useLeadsQuery();
   const { data: accounts } = useAccountsQuery();
   const { data: queueItems } = useAutomationQueueQuery();
+  const { data: apiCredentials } = useApiCredentialsQuery();
 
   const addLeadMutation = useAddLeadMutation();
   const updateStageMutation = useUpdateLeadStageMutation();
@@ -49,12 +56,27 @@ export const CRMView: React.FC = () => {
   const scheduleActionMutation = useScheduleActionMutation();
   const deleteQueueItemMutation = useDeleteQueueItemMutation();
   const markDeadLeadsMutation = useMarkDeadLeadsMutation();
+  const generateFunnelMessageMutation = useGenerateFunnelMessageMutation();
+  const generateAndScheduleMessageMutation = useGenerateAndScheduleMessageMutation();
 
   // Modals state
   const [showAddLeadModal, setShowAddLeadModal] = useState(false);
   const [showScheduleModal, setShowScheduleModal] = useState(false);
   const [showQueueModal, setShowQueueModal] = useState(false);
+  const [showAIFunnelModal, setShowAIFunnelModal] = useState(false);
   const [selectedLeadForAction, setSelectedLeadForAction] = useState<Lead | null>(null);
+  const [selectedLeadForAI, setSelectedLeadForAI] = useState<Lead | null>(null);
+
+  // AI Funnel form state
+  const [aiFramework, setAiFramework] = useState<'aida' | 'spin'>('aida');
+  const [aiStage, setAiStage] = useState('attention');
+  const [aiAccountId, setAiAccountId] = useState('');
+  const [aiCredentialId, setAiCredentialId] = useState('');
+  const [aiModelName, setAiModelName] = useState('gpt-4o-mini');
+  const [aiCustomContext, setAiCustomContext] = useState('');
+  const [aiApplyHumanizer, setAiApplyHumanizer] = useState(true);
+  const [aiGeneratedText, setAiGeneratedText] = useState('');
+  const [hasCopied, setHasCopied] = useState(false);
 
   // Add lead form state
   const [leadPlatform, setLeadPlatform] = useState<Platform>('vk');
@@ -107,6 +129,119 @@ export const CRMView: React.FC = () => {
       setActionAccountId(accounts[0].id);
     }
     setShowScheduleModal(true);
+  };
+
+  const handleOpenAIFunnelModal = (lead: Lead) => {
+    setSelectedLeadForAI(lead);
+    // Pre-select account for platform
+    const matchingAcc = accounts?.find(
+      (a) => a.platform.toLowerCase() === lead.platform.toLowerCase()
+    );
+    if (matchingAcc) {
+      setAiAccountId(matchingAcc.id);
+    } else if (accounts && accounts.length > 0) {
+      setAiAccountId(accounts[0].id);
+    }
+
+    // Pre-select credential
+    if (apiCredentials && apiCredentials.length > 0) {
+      setAiCredentialId(apiCredentials[0].id);
+      if (apiCredentials[0].provider === 'anthropic') {
+        setAiModelName('claude-3-5-sonnet-20241022');
+      } else {
+        setAiModelName('gpt-4o-mini');
+      }
+    }
+
+    // Pre-select stage
+    if (lead.funnel_stage.includes('interest')) {
+      setAiFramework('aida');
+      setAiStage('interest');
+    } else if (lead.funnel_stage.includes('attention')) {
+      setAiFramework('aida');
+      setAiStage('attention');
+    } else {
+      setAiFramework('aida');
+      setAiStage('attention');
+    }
+
+    setAiGeneratedText('');
+    setShowAIFunnelModal(true);
+  };
+
+  const handleGenerateAIDraft = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!selectedLeadForAI) return;
+    if (!aiCredentialId) {
+      toast.error('Выберите или настройте LLM API ключ');
+      return;
+    }
+
+    generateFunnelMessageMutation.mutate(
+      {
+        leadId: selectedLeadForAI.id,
+        credentialId: aiCredentialId,
+        framework: aiFramework,
+        stage: aiStage,
+        customContext: aiCustomContext.trim(),
+        applyHumanizer: aiApplyHumanizer,
+        modelName: aiModelName.trim() || undefined,
+      },
+      {
+        onSuccess: (text) => {
+          setAiGeneratedText(text);
+          toast.success('Сообщение успешно сгенерировано нейросетью!');
+        },
+        onError: (err) => {
+          toast.error(`Ошибка генерации: ${err.message}`);
+        },
+      }
+    );
+  };
+
+  const handleGenerateAndSchedule = () => {
+    if (!selectedLeadForAI) return;
+    if (!aiAccountId) {
+      toast.error('Выберите аккаунт для отправки');
+      return;
+    }
+    if (!aiCredentialId) {
+      toast.error('Выберите LLM API ключ');
+      return;
+    }
+
+    generateAndScheduleMessageMutation.mutate(
+      {
+        leadId: selectedLeadForAI.id,
+        accountId: aiAccountId,
+        credentialId: aiCredentialId,
+        framework: aiFramework,
+        stage: aiStage,
+        customContext: aiCustomContext.trim(),
+        applyHumanizer: aiApplyHumanizer,
+        modelName: aiModelName.trim() || undefined,
+      },
+      {
+        onSuccess: () => {
+          toast.success(
+            'Сообщение сгенерировано и запланировано с анти-бан задержкой 15–45 мин!'
+          );
+          setShowAIFunnelModal(false);
+          setAiGeneratedText('');
+        },
+        onError: (err) => {
+          toast.error(`Ошибка планирования: ${err.message}`);
+        },
+      }
+    );
+  };
+
+  const handleCopyGeneratedText = () => {
+    if (!aiGeneratedText) return;
+    navigator.clipboard.writeText(aiGeneratedText);
+    setHasCopied(true);
+    toast.success('Текст скопирован в буфер обмена');
+    setTimeout(() => setHasCopied(false), 2000);
   };
 
   const handleScheduleAction = (e: React.FormEvent) => {
@@ -355,11 +490,21 @@ export const CRMView: React.FC = () => {
                         <div className="flex items-center gap-1.5 pt-1">
                           <button
                             type="button"
-                            onClick={() => handleOpenScheduleModal(lead)}
-                            className="flex-1 inline-flex items-center justify-center gap-1 py-1 px-2 bg-purple-500/10 hover:bg-purple-500/20 text-purple-700 dark:text-purple-300 rounded-lg text-[11px] font-semibold transition-colors"
+                            onClick={() => handleOpenAIFunnelModal(lead)}
+                            className="flex-1 inline-flex items-center justify-center gap-1 py-1 px-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-[11px] font-semibold transition-colors shadow-2xs"
+                            title="Сгенерировать сообщение по моделям AIDA / SPIN"
                           >
-                            <Sparkles className="w-3 h-3 text-purple-500" />
-                            <span>Действие</span>
+                            <Sparkles className="w-3 h-3" />
+                            <span>ИИ Воронка</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handleOpenScheduleModal(lead)}
+                            className="p-1 px-2 bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-700 dark:hover:bg-zinc-600 text-zinc-700 dark:text-zinc-200 rounded-lg text-[11px] font-medium transition-colors"
+                            title="Запланировать действие вручную"
+                          >
+                            <Clock className="w-3 h-3 text-purple-500" />
                           </button>
 
                           {/* Stage mover dropdown */}
@@ -756,6 +901,353 @@ export const CRMView: React.FC = () => {
               >
                 Закрыть
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 4. Modal: AI Funnel Message Generator (AIDA / SPIN) */}
+      {showAIFunnelModal && selectedLeadForAI && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+          <div className="relative w-full max-w-2xl bg-white dark:bg-zinc-900 rounded-2xl shadow-2xl border border-zinc-200 dark:border-zinc-800 p-6 space-y-4 max-h-[90vh] flex flex-col">
+            {/* Header */}
+            <div className="flex items-center justify-between pb-3 border-b border-zinc-200 dark:border-zinc-800 shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-purple-500/10 text-purple-600 dark:text-purple-400 rounded-xl">
+                  <BrainCircuit className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-zinc-900 dark:text-zinc-100 flex items-center gap-2">
+                    <span>ИИ-Генератор сообщений воронки</span>
+                    <span className="text-xs font-mono font-normal px-2 py-0.5 rounded-full bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20">
+                      {selectedLeadForAI.platform.toUpperCase()}
+                    </span>
+                  </h3>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                    Персонализированная генерация для <strong className="text-zinc-700 dark:text-zinc-200">{selectedLeadForAI.name}</strong> ({selectedLeadForAI.external_id})
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setShowAIFunnelModal(false)}
+                className="p-1.5 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Scrollable Form Body */}
+            <div className="flex-1 overflow-y-auto space-y-4 pr-1">
+              {/* Framework Switcher (AIDA vs SPIN) */}
+              <div>
+                <label className="text-xs font-bold text-zinc-700 dark:text-zinc-300 block mb-1.5">
+                  Методология воронки
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAiFramework('aida');
+                      setAiStage('attention');
+                    }}
+                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                      aiFramework === 'aida'
+                        ? 'bg-purple-500/10 border-purple-500 text-purple-700 dark:text-purple-300 shadow-2xs'
+                        : 'bg-zinc-50 dark:bg-zinc-800/60 border-zinc-200 dark:border-zinc-700/60 text-zinc-600 dark:text-zinc-400 hover:border-zinc-300'
+                    }`}
+                  >
+                    <div className="font-bold text-xs flex items-center justify-between">
+                      <span>AIDA</span>
+                      <span className="text-[10px] font-mono opacity-75">Классика</span>
+                    </div>
+                    <div className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5 leading-snug">
+                      Внимание → Интерес → Желание → Действие
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAiFramework('spin');
+                      setAiStage('problem');
+                    }}
+                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                      aiFramework === 'spin'
+                        ? 'bg-purple-500/10 border-purple-500 text-purple-700 dark:text-purple-300 shadow-2xs'
+                        : 'bg-zinc-50 dark:bg-zinc-800/60 border-zinc-200 dark:border-zinc-700/60 text-zinc-600 dark:text-zinc-400 hover:border-zinc-300'
+                    }`}
+                  >
+                    <div className="font-bold text-xs flex items-center justify-between">
+                      <span>SPIN</span>
+                      <span className="text-[10px] font-mono opacity-75">B2B Продажи</span>
+                    </div>
+                    <div className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5 leading-snug">
+                      Ситуация → Проблема → Извлечение → Направление
+                    </div>
+                  </button>
+                </div>
+              </div>
+
+              {/* Stage Selection */}
+              <div>
+                <label className="text-xs font-bold text-zinc-700 dark:text-zinc-300 block mb-1.5">
+                  Этап диалога ({aiFramework.toUpperCase()})
+                </label>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                  {aiFramework === 'aida' ? (
+                    <>
+                      {[
+                        { id: 'attention', label: '1. Attention', desc: 'Внимание и контакт' },
+                        { id: 'interest', label: '2. Interest', desc: 'Инсайт и интерес' },
+                        { id: 'desire', label: '3. Desire', desc: 'Выгода решения' },
+                        { id: 'action', label: '4. Action', desc: 'Призыв к действию' },
+                      ].map((st) => (
+                        <button
+                          key={st.id}
+                          type="button"
+                          onClick={() => setAiStage(st.id)}
+                          className={`p-2 rounded-xl border text-center transition-all cursor-pointer ${
+                            aiStage === st.id
+                              ? 'bg-purple-600 text-white border-purple-600 shadow-xs'
+                              : 'bg-zinc-50 dark:bg-zinc-800/60 border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100'
+                          }`}
+                        >
+                          <div className="font-bold text-xs">{st.label}</div>
+                          <div className="text-[10px] opacity-80 mt-0.5">{st.desc}</div>
+                        </button>
+                      ))}
+                    </>
+                  ) : (
+                    <>
+                      {[
+                        { id: 'situation', label: '1. Situation', desc: 'Текущие процессы' },
+                        { id: 'problem', label: '2. Problem', desc: 'Боль и проблемы' },
+                        { id: 'implication', label: '3. Implication', desc: 'Скрытые риски' },
+                        { id: 'need_payoff', label: '4. Need-Payoff', desc: 'Ценность решения' },
+                      ].map((st) => (
+                        <button
+                          key={st.id}
+                          type="button"
+                          onClick={() => setAiStage(st.id)}
+                          className={`p-2 rounded-xl border text-center transition-all cursor-pointer ${
+                            aiStage === st.id
+                              ? 'bg-purple-600 text-white border-purple-600 shadow-xs'
+                              : 'bg-zinc-50 dark:bg-zinc-800/60 border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100'
+                          }`}
+                        >
+                          <div className="font-bold text-xs">{st.label}</div>
+                          <div className="text-[10px] opacity-80 mt-0.5">{st.desc}</div>
+                        </button>
+                      ))}
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* LLM & Sending Account Configuration */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div>
+                  <label className="text-xs font-medium text-zinc-700 dark:text-zinc-300 block mb-1">
+                    LLM API Ключ
+                  </label>
+                  {!apiCredentials || apiCredentials.length === 0 ? (
+                    <div className="text-[11px] text-amber-500 bg-amber-500/10 p-2 rounded-xl border border-amber-500/20">
+                      Нет ключей. Добавьте в настройках LLM Gateway.
+                    </div>
+                  ) : (
+                    <select
+                      value={aiCredentialId}
+                      onChange={(e) => {
+                        setAiCredentialId(e.target.value);
+                        const sel = apiCredentials.find((c) => c.id === e.target.value);
+                        if (sel?.provider === 'anthropic') {
+                          setAiModelName('claude-3-5-sonnet-20241022');
+                        } else {
+                          setAiModelName('gpt-4o-mini');
+                        }
+                      }}
+                      className="w-full p-2 bg-zinc-50 dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200 rounded-xl text-xs border border-zinc-200 dark:border-zinc-700 focus:outline-hidden"
+                    >
+                      {apiCredentials.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name} ({c.provider})
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+
+                <div>
+                  <label className="text-xs font-medium text-zinc-700 dark:text-zinc-300 block mb-1">
+                    Модель нейросети
+                  </label>
+                  <input
+                    type="text"
+                    value={aiModelName}
+                    onChange={(e) => setAiModelName(e.target.value)}
+                    placeholder="gpt-4o-mini"
+                    className="w-full p-2 bg-zinc-50 dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200 rounded-xl text-xs border border-zinc-200 dark:border-zinc-700 focus:outline-hidden font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-medium text-zinc-700 dark:text-zinc-300 block mb-1">
+                    Аккаунт отправки
+                  </label>
+                  <select
+                    value={aiAccountId}
+                    onChange={(e) => setAiAccountId(e.target.value)}
+                    className="w-full p-2 bg-zinc-50 dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200 rounded-xl text-xs border border-zinc-200 dark:border-zinc-700 focus:outline-hidden"
+                  >
+                    {accounts?.map((acc) => (
+                      <option key={acc.id} value={acc.id}>
+                        {acc.name} ({acc.platform.toUpperCase()})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Custom Context */}
+              <div>
+                <label className="text-xs font-bold text-zinc-700 dark:text-zinc-300 block mb-1">
+                  Контекст темы / боли / предложения
+                </label>
+                <textarea
+                  value={aiCustomContext}
+                  onChange={(e) => setAiCustomContext(e.target.value)}
+                  rows={2}
+                  placeholder="Например: Автоматизация постинга контента во ВКонтакте и Telegram, защита от спам-фильтров и экономия 15 часов в неделю"
+                  className="w-full p-2.5 bg-zinc-50 dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200 rounded-xl text-xs border border-zinc-200 dark:border-zinc-700 focus:outline-hidden resize-none"
+                />
+              </div>
+
+              {/* Humanizer switch */}
+              <div className="p-3 bg-purple-500/5 dark:bg-purple-950/20 border border-purple-500/20 rounded-xl flex items-center justify-between">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-zinc-800 dark:text-zinc-200">
+                      Модуль Humanizer (Очеловечивание текста)
+                    </span>
+                    <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-sm bg-purple-500/10 text-purple-600 dark:text-purple-400 font-semibold">
+                      Anti-Detector
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5">
+                    Чередование длины предложений, непредсказуемая лексика и фильтрация маркеров ИИ
+                  </div>
+                </div>
+
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={aiApplyHumanizer}
+                    onChange={(e) => setAiApplyHumanizer(e.target.checked)}
+                    className="sr-only peer"
+                  />
+                  <div className="w-9 h-5 bg-zinc-300 peer-focus:outline-hidden rounded-full peer dark:bg-zinc-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all dark:border-zinc-600 peer-checked:bg-purple-600"></div>
+                </label>
+              </div>
+
+              {/* Generated Text Preview Area */}
+              {aiGeneratedText && (
+                <div className="space-y-1.5 pt-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-zinc-700 dark:text-zinc-300 flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-purple-500" />
+                      <span>Сгенерированное сообщение:</span>
+                    </span>
+
+                    <button
+                      type="button"
+                      onClick={handleCopyGeneratedText}
+                      className="inline-flex items-center gap-1 text-[11px] font-medium text-purple-600 hover:text-purple-700 transition-colors"
+                    >
+                      {hasCopied ? (
+                        <>
+                          <Check className="w-3.5 h-3.5 text-emerald-500" />
+                          <span className="text-emerald-500">Скопировано</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3.5 h-3.5" />
+                          <span>Копировать</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+
+                  <textarea
+                    value={aiGeneratedText}
+                    onChange={(e) => setAiGeneratedText(e.target.value)}
+                    rows={4}
+                    className="w-full p-3 bg-zinc-900 text-zinc-100 rounded-xl text-xs font-sans border border-zinc-700 focus:outline-hidden leading-relaxed"
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* Modal Actions Footer */}
+            <div className="pt-3 border-t border-zinc-200 dark:border-zinc-800 flex flex-wrap items-center justify-between gap-2 shrink-0">
+              <div className="text-[11px] text-zinc-500 flex items-center gap-1">
+                <ShieldCheck className="w-3.5 h-3.5 text-purple-500" />
+                <span>Автоматический расчет анти-бан задержки (15–45 мин + джиттер)</span>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAIFunnelModal(false)}
+                  className="px-3.5 py-2 text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-xl transition-colors cursor-pointer"
+                >
+                  Отмена
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleGenerateAIDraft}
+                  disabled={generateFunnelMessageMutation.isPending || !aiCredentialId}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-purple-700 dark:text-purple-300 bg-purple-500/10 hover:bg-purple-500/20 rounded-xl transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  {generateFunnelMessageMutation.isPending ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Генерация...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-3.5 h-3.5" />
+                      <span>Сгенерировать черновик</span>
+                    </>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleGenerateAndSchedule}
+                  disabled={
+                    generateAndScheduleMessageMutation.isPending ||
+                    generateFunnelMessageMutation.isPending ||
+                    !aiAccountId ||
+                    !aiCredentialId
+                  }
+                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-purple-600 hover:bg-purple-700 rounded-xl shadow-xs transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  {generateAndScheduleMessageMutation.isPending ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Планирование...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Clock className="w-3.5 h-3.5" />
+                      <span>Сгенерировать и запланировать</span>
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
           </div>
         </div>
