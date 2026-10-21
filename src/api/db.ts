@@ -531,4 +531,16 @@ export async function getFunnelAnalytics(): Promise<FunnelMetrics> {
   return await safeInvoke<FunnelMetrics>('get_funnel_analytics');
 }
 
+// ============================================================================
+// Backup & Restore API
+// ============================================================================
+
+export async function exportDatabase(destinationPath: string): Promise<void> {
+  return await safeInvoke<void>('export_database', { destinationPath });
+}
+
+export async function importDatabase(sourcePath: string): Promise<void> {
+  return await safeInvoke<void>('import_database', { sourcePath });
+}
+
 

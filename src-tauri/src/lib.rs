@@ -1,5 +1,6 @@
 pub mod analytics;
 pub mod automation_worker;
+pub mod backup;
 pub mod commands;
 pub mod crm;
 pub mod crm_connectors;
@@ -175,7 +176,9 @@ pub fn run() {
             crm::mark_dead_leads,
             crm::generate_funnel_message,
             crm::generate_and_schedule_message,
-            analytics::get_funnel_analytics
+            analytics::get_funnel_analytics,
+            backup::export_database,
+            backup::import_database
         ]);
 
     #[allow(unused_mut)]

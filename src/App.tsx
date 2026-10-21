@@ -4,7 +4,8 @@ import { PostsView } from './components/PostsView';
 import { ContentGrabberView } from './components/ContentGrabberView';
 import { CRMView } from './components/CRMView';
 import { AnalyticsView } from './components/AnalyticsView';
-import { Calendar, Users, Sparkles, RefreshCw, ArrowDownCircle, Rss, Bot, Terminal, GitFork, BarChart3 } from 'lucide-react';
+import { SettingsView } from './components/SettingsView';
+import { Calendar, Users, Sparkles, RefreshCw, ArrowDownCircle, Rss, Bot, Terminal, GitFork, BarChart3, Database } from 'lucide-react';
 import { Toaster } from 'sonner';
 import { useUpdater } from './hooks/useUpdater';
 import { UpdateDialog } from './components/UpdateDialog';
@@ -13,7 +14,7 @@ import { AISettingsModal } from './components/AISettingsModal';
 import { LogTerminal } from './components/LogTerminal';
 import { useSystemLogs } from './hooks/useSystemLogs';
 
-type ActiveTab = 'posts' | 'grabber' | 'accounts' | 'crm' | 'analytics';
+type ActiveTab = 'posts' | 'grabber' | 'accounts' | 'crm' | 'analytics' | 'settings';
 
 export function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('posts');
@@ -114,6 +115,18 @@ export function App() {
               <BarChart3 className="w-4 h-4 text-indigo-500" />
               Аналитика
             </button>
+
+            <button
+              onClick={() => setActiveTab('settings')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition-all ${
+                activeTab === 'settings'
+                  ? 'bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-50 shadow-xs'
+                  : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200'
+              }`}
+            >
+              <Database className="w-4 h-4 text-blue-500" />
+              База / Бэкап
+            </button>
           </nav>
 
           {/* Right Header Section: Autostart, Updater & Tokio Worker Status */}
@@ -197,6 +210,7 @@ export function App() {
         {activeTab === 'accounts' && <AccountsView />}
         {activeTab === 'crm' && <CRMView />}
         {activeTab === 'analytics' && <AnalyticsView onNavigateToCRM={() => setActiveTab('crm')} />}
+        {activeTab === 'settings' && <SettingsView />}
       </main>
 
       {/* Live System Log Terminal (Bottom Drawer) */}
