@@ -1,4 +1,6 @@
+pub mod automation_worker;
 pub mod commands;
+pub mod crm;
 pub mod crypto;
 pub mod db;
 pub mod llm_gateway;
@@ -35,6 +37,12 @@ pub fn run() {
             sql: db::MIGRATION_03_SQL,
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 4,
+            description: "create_crm_and_funnels_tables",
+            sql: db::MIGRATION_04_SQL,
+            kind: MigrationKind::Up,
+        },
     ];
 
     let builder = tauri::Builder::default()
@@ -66,6 +74,9 @@ pub fn run() {
 
             // Invariant: Start background scheduler worker non-blocking via tokio::spawn
             scheduler::start_worker(app.handle().clone(), pool.clone());
+
+            // Invariant: Start background CRM Funnel Automation worker
+            automation_worker::start_automation_worker(app.handle().clone(), pool.clone());
 
             // Manage DbState for Tauri commands
             app.manage(db::DbState { pool });
@@ -150,7 +161,15 @@ pub fn run() {
             commands::create_api_credential,
             commands::get_api_credentials,
             commands::delete_api_credential,
-            commands::generate_ai_rewrite
+            commands::generate_ai_rewrite,
+            crm::add_lead,
+            crm::get_leads,
+            crm::update_lead_stage,
+            crm::delete_lead,
+            crm::schedule_action,
+            crm::get_automation_queue,
+            crm::delete_queue_item,
+            crm::mark_dead_leads
         ]);
 
     #[allow(unused_mut)]
@@ -736,5 +755,165 @@ mod tests {
 
         assert!(role_pos < humanizer_pos, "Role must come before Humanizer rules");
         assert!(humanizer_pos < task_pos, "Humanizer rules must come before user task");
+    }
+
+    #[tokio::test]
+    async fn test_crm_leads_crud_and_upsert() {
+        let temp_dir = tempdir().expect("Failed to create temp dir");
+        let pool = db::init_db(temp_dir.path()).await.expect("Failed to init db");
+
+        // 1. Add lead
+        let input = models::CreateLeadInput {
+            id: None,
+            platform: "vk".to_string(),
+            external_id: "id123456".to_string(),
+            name: "Иван Иванов".to_string(),
+            funnel_stage: Some("new".to_string()),
+            last_interaction_at: None,
+            created_at: None,
+        };
+        let created = db::add_lead(&pool, input).await.expect("Add lead failed");
+        assert_eq!(created.name, "Иван Иванов");
+        assert_eq!(created.funnel_stage, "new");
+
+        // 2. Fetch leads
+        let leads = db::get_leads(&pool).await.expect("Get leads failed");
+        assert_eq!(leads.len(), 1);
+        assert_eq!(leads[0].id, created.id);
+
+        // 3. Upsert: same platform and external_id with updated name and stage
+        let upsert_input = models::CreateLeadInput {
+            id: None,
+            platform: "vk".to_string(),
+            external_id: "id123456".to_string(),
+            name: "Иван Иванов (VIP)".to_string(),
+            funnel_stage: Some("aida_attention".to_string()),
+            last_interaction_at: None,
+            created_at: None,
+        };
+        let upserted = db::add_lead(&pool, upsert_input).await.expect("Upsert failed");
+        assert_eq!(upserted.id, created.id);
+        assert_eq!(upserted.name, "Иван Иванов (VIP)");
+        assert_eq!(upserted.funnel_stage, "aida_attention");
+
+        // 4. Update stage directly
+        let updated = db::update_lead_stage(&pool, &created.id, "closed").await.unwrap();
+        assert!(updated);
+        let lead_after = db::get_lead_by_id(&pool, &created.id).await.unwrap().unwrap();
+        assert_eq!(lead_after.funnel_stage, "closed");
+
+        // 5. Test dead leads cold marking
+        // Create an inactive lead with last_interaction 4 days ago
+        let four_days_ago = chrono::Utc::now().timestamp() - (4 * 86400);
+        let dead_lead_input = models::CreateLeadInput {
+            id: None,
+            platform: "tg".to_string(),
+            external_id: "@ghost_user".to_string(),
+            name: "Молчун".to_string(),
+            funnel_stage: Some("request_sent".to_string()),
+            last_interaction_at: Some(four_days_ago),
+            created_at: Some(four_days_ago),
+        };
+        let dead_lead = db::add_lead(&pool, dead_lead_input).await.unwrap();
+        assert_eq!(dead_lead.funnel_stage, "request_sent");
+
+        // Mark leads dead (> 3 days)
+        let marked = db::mark_dead_leads_as_cold(&pool, 3).await.unwrap();
+        assert!(marked >= 1);
+
+        let dead_after = db::get_lead_by_id(&pool, &dead_lead.id).await.unwrap().unwrap();
+        assert_eq!(dead_after.funnel_stage, "cold");
+
+        // 6. Delete lead
+        let deleted = db::delete_lead(&pool, &created.id).await.unwrap();
+        assert!(deleted);
+    }
+
+    #[tokio::test]
+    async fn test_automation_queue_scheduling_and_rate_limiting() {
+        let temp_dir = tempdir().expect("Failed to create temp dir");
+        let pool = db::init_db(temp_dir.path()).await.expect("Failed to init db");
+
+        // 1. Create account
+        let acc = db::create_account(
+            &pool,
+            models::CreateAccountInput {
+                id: None,
+                platform: "vk".to_string(),
+                name: "VK Seller".to_string(),
+                encrypted_token: "encrypted".to_string(),
+                created_at: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // 2. Create lead
+        let lead = db::add_lead(
+            &pool,
+            models::CreateLeadInput {
+                id: None,
+                platform: "vk".to_string(),
+                external_id: "vk_client_1".to_string(),
+                name: "Клиент 1".to_string(),
+                funnel_stage: Some("new".to_string()),
+                last_interaction_at: None,
+                created_at: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // 3. Schedule task with execute_after in the past
+        let past = chrono::Utc::now().timestamp() - 10;
+        let task = db::add_queue_item(
+            &pool,
+            None,
+            &lead.id,
+            &acc.id,
+            "send_friend_request",
+            "{}",
+            past,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(task.status, "pending");
+
+        // Also schedule a second task for the same account
+        let _task2 = db::add_queue_item(
+            &pool,
+            None,
+            &lead.id,
+            &acc.id,
+            "send_message",
+            r#"{"text":"Привет"}"#,
+            past,
+        )
+        .await
+        .unwrap();
+
+        // 4. Run automation worker iteration
+        let limiter = automation_worker::AutomationRateLimiter::new();
+        let executed = automation_worker::process_due_automation_tasks(None, &pool, &limiter)
+            .await
+            .expect("Execution failed");
+
+        // Invariant: Rate Limiter permits exactly 1 action per minute per account!
+        assert_eq!(executed, 1, "Global Rate Limiter must allow only 1 action per minute for account");
+
+        // Verify task 1 is completed
+        let tasks = db::get_automation_queue(&pool).await.unwrap();
+        let completed_task = tasks.iter().find(|t| t.id == task.id).unwrap();
+        assert_eq!(completed_task.status, "completed");
+
+        // Verify lead moved to request_sent
+        let lead_after = db::get_lead_by_id(&pool, &lead.id).await.unwrap().unwrap();
+        assert_eq!(lead_after.funnel_stage, "request_sent");
+
+        // 5. Test Cascade Delete: deleting lead removes its tasks
+        db::delete_lead(&pool, &lead.id).await.unwrap();
+        let remaining_tasks = db::get_automation_queue(&pool).await.unwrap();
+        assert_eq!(remaining_tasks.len(), 0, "Queue tasks must be cascaded on lead deletion");
     }
 }

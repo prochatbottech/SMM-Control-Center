@@ -5,7 +5,8 @@ use sqlx::{
 };
 use uuid::Uuid;
 use crate::models::{
-    Account, ApiCredential, CreateAccountInput, CreatePostInput, DestinationInfo, Post, PostRow,
+    Account, ApiCredential, AutomationQueueItem, CreateAccountInput, CreateLeadInput,
+    CreatePostInput, DestinationInfo, EnrichedAutomationQueueItem, Lead, Post, PostRow,
     PostStatus,
 };
 
@@ -13,6 +14,7 @@ pub const DB_FILE_NAME: &str = "smm_local.db";
 pub const MIGRATION_01_SQL: &str = include_str!("../migrations/01_initial.sql");
 pub const MIGRATION_02_SQL: &str = include_str!("../migrations/02_add_destinations_status.sql");
 pub const MIGRATION_03_SQL: &str = include_str!("../migrations/03_api_credentials.sql");
+pub const MIGRATION_04_SQL: &str = include_str!("../migrations/04_crm_and_funnels.sql");
 pub const INITIAL_MIGRATION_SQL: &str = MIGRATION_01_SQL;
 
 /// Holds the SQLite connection pool as Tauri managed state
@@ -136,6 +138,24 @@ pub async fn apply_migrations(pool: &SqlitePool) -> Result<(), String> {
             .execute(pool)
             .await
             .map_err(|e| format!("Failed to record migration 03: {}", e))?;
+    }
+
+    // Migration 04 (Local CRM & Funnels Automation Queue)
+    if !applied_versions.contains(&4) {
+        for statement in MIGRATION_04_SQL.split(';') {
+            let trimmed = statement.trim();
+            if !trimmed.is_empty() {
+                sqlx::query(trimmed)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| format!("Migration 04 statement failed ({}): {}", trimmed, e))?;
+            }
+        }
+        sqlx::query("INSERT INTO _schema_migrations (version, applied_at) VALUES (4, ?)")
+            .bind(chrono::Utc::now().timestamp())
+            .execute(pool)
+            .await
+            .map_err(|e| format!("Failed to record migration 04: {}", e))?;
     }
 
     Ok(())
@@ -728,6 +748,321 @@ pub async fn delete_api_credential(pool: &SqlitePool, id: &str) -> Result<bool, 
         .execute(pool)
         .await
         .map_err(|e| format!("Failed to delete api credential '{}': {}", id, e))?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+// ==========================================
+// Local CRM & Funnel State Machine
+// ==========================================
+
+pub async fn add_lead(pool: &SqlitePool, input: CreateLeadInput) -> Result<Lead, String> {
+    let platform = input.platform.trim().to_lowercase();
+    if platform != "vk" && platform != "tg" && platform != "ok" {
+        return Err(format!(
+            "Invalid lead platform '{}'. Allowed: 'vk', 'tg', 'ok'",
+            platform
+        ));
+    }
+
+    let external_id = input.external_id.trim();
+    if external_id.is_empty() {
+        return Err("Lead 'external_id' cannot be empty".to_string());
+    }
+
+    let name = input.name.trim();
+    if name.is_empty() {
+        return Err("Lead 'name' cannot be empty".to_string());
+    }
+
+    let id = match input.id {
+        Some(ref id_str) => {
+            Uuid::parse_str(id_str)
+                .map_err(|e| format!("Invalid UUID for lead id '{}': {}", id_str, e))?
+                .to_string()
+        }
+        None => Uuid::new_v4().to_string(),
+    };
+
+    let funnel_stage = input.funnel_stage.unwrap_or_else(|| "new".to_string());
+    let now = chrono::Utc::now().timestamp();
+    let created_at = input.created_at.unwrap_or(now);
+    let last_interaction_at = input.last_interaction_at.or(Some(now));
+
+    let lead = sqlx::query_as::<_, Lead>(
+        r#"
+        INSERT INTO leads (id, platform, external_id, name, funnel_stage, last_interaction_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(platform, external_id) DO UPDATE SET
+            name = excluded.name,
+            funnel_stage = excluded.funnel_stage,
+            last_interaction_at = COALESCE(excluded.last_interaction_at, leads.last_interaction_at)
+        RETURNING id, platform, external_id, name, funnel_stage, last_interaction_at, created_at
+        "#,
+    )
+    .bind(&id)
+    .bind(&platform)
+    .bind(external_id)
+    .bind(name)
+    .bind(&funnel_stage)
+    .bind(last_interaction_at)
+    .bind(created_at)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Failed to insert or update lead: {}", e))?;
+
+    Ok(lead)
+}
+
+pub async fn get_leads(pool: &SqlitePool) -> Result<Vec<Lead>, String> {
+    let leads = sqlx::query_as::<_, Lead>(
+        r#"
+        SELECT id, platform, external_id, name, funnel_stage, last_interaction_at, created_at
+        FROM leads
+        ORDER BY created_at DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to fetch leads: {}", e))?;
+
+    Ok(leads)
+}
+
+pub async fn get_lead_by_id(pool: &SqlitePool, id: &str) -> Result<Option<Lead>, String> {
+    let lead = sqlx::query_as::<_, Lead>(
+        r#"
+        SELECT id, platform, external_id, name, funnel_stage, last_interaction_at, created_at
+        FROM leads
+        WHERE id = ?
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Failed to fetch lead '{}': {}", id, e))?;
+
+    Ok(lead)
+}
+
+pub async fn update_lead_stage(
+    pool: &SqlitePool,
+    id: &str,
+    funnel_stage: &str,
+) -> Result<bool, String> {
+    let now = chrono::Utc::now().timestamp();
+    let result = sqlx::query(
+        r#"
+        UPDATE leads
+        SET funnel_stage = ?, last_interaction_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(funnel_stage)
+    .bind(now)
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to update lead stage: {}", e))?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn delete_lead(pool: &SqlitePool, id: &str) -> Result<bool, String> {
+    let result = sqlx::query("DELETE FROM leads WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to delete lead '{}': {}", id, e))?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+/// Edge Case - Dead Leads:
+/// If a lead has not interacted for 3+ days (259200 seconds), mark as 'cold'.
+pub async fn mark_dead_leads_as_cold(pool: &SqlitePool, days: i64) -> Result<u64, String> {
+    let threshold = chrono::Utc::now().timestamp() - (days * 86400);
+    let result = sqlx::query(
+        r#"
+        UPDATE leads
+        SET funnel_stage = 'cold'
+        WHERE last_interaction_at <= ?
+          AND funnel_stage NOT IN ('closed', 'cold')
+        "#,
+    )
+    .bind(threshold)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to mark dead leads as cold: {}", e))?;
+
+    Ok(result.rows_affected())
+}
+
+// ==========================================
+// Automation Queue Operations
+// ==========================================
+
+pub async fn add_queue_item(
+    pool: &SqlitePool,
+    id: Option<String>,
+    lead_id: &str,
+    account_id: &str,
+    action_type: &str,
+    payload: &str,
+    execute_after: i64,
+) -> Result<AutomationQueueItem, String> {
+    let valid_actions = ["send_friend_request", "send_message", "send_sticker", "check_status"];
+    if !valid_actions.contains(&action_type) {
+        return Err(format!(
+            "Invalid action_type '{}'. Allowed: {:?}",
+            action_type, valid_actions
+        ));
+    }
+
+    let id = match id {
+        Some(ref id_str) => {
+            Uuid::parse_str(id_str)
+                .map_err(|e| format!("Invalid UUID for queue id '{}': {}", id_str, e))?
+                .to_string()
+        }
+        None => Uuid::new_v4().to_string(),
+    };
+
+    let created_at = chrono::Utc::now().timestamp();
+
+    sqlx::query(
+        r#"
+        INSERT INTO automation_queue (id, lead_id, account_id, action_type, payload, execute_after, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+        "#,
+    )
+    .bind(&id)
+    .bind(lead_id)
+    .bind(account_id)
+    .bind(action_type)
+    .bind(payload)
+    .bind(execute_after)
+    .bind(created_at)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to insert automation queue item: {}", e))?;
+
+    Ok(AutomationQueueItem {
+        id,
+        lead_id: lead_id.to_string(),
+        account_id: account_id.to_string(),
+        action_type: action_type.to_string(),
+        payload: payload.to_string(),
+        execute_after,
+        status: "pending".to_string(),
+        created_at,
+    })
+}
+
+pub async fn get_automation_queue(
+    pool: &SqlitePool,
+) -> Result<Vec<EnrichedAutomationQueueItem>, String> {
+    let rows = sqlx::query_as::<_, (String, String, String, String, String, String, String, String, i64, String, i64)>(
+        r#"
+        SELECT 
+            q.id, q.lead_id, l.name as lead_name, l.platform,
+            q.account_id, a.name as account_name,
+            q.action_type, q.payload, q.execute_after, q.status, q.created_at
+        FROM automation_queue q
+        JOIN leads l ON q.lead_id = l.id
+        JOIN accounts a ON q.account_id = a.id
+        ORDER BY q.execute_after ASC
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to fetch automation queue: {}", e))?;
+
+    let items = rows
+        .into_iter()
+        .map(|(id, lead_id, lead_name, platform, account_id, account_name, action_type, payload, execute_after, status, created_at)| {
+            EnrichedAutomationQueueItem {
+                id,
+                lead_id,
+                lead_name,
+                platform,
+                account_id,
+                account_name,
+                action_type,
+                payload,
+                execute_after,
+                status,
+                created_at,
+            }
+        })
+        .collect();
+
+    Ok(items)
+}
+
+pub async fn delete_queue_item(pool: &SqlitePool, id: &str) -> Result<bool, String> {
+    let result = sqlx::query("DELETE FROM automation_queue WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to delete queue item '{}': {}", id, e))?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn get_due_automation_tasks(
+    pool: &SqlitePool,
+    now: i64,
+) -> Result<Vec<AutomationQueueItem>, String> {
+    let tasks = sqlx::query_as::<_, AutomationQueueItem>(
+        r#"
+        SELECT id, lead_id, account_id, action_type, payload, execute_after, status, created_at
+        FROM automation_queue
+        WHERE status = 'pending' AND execute_after <= ?
+        ORDER BY execute_after ASC
+        "#,
+    )
+    .bind(now)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to fetch due automation tasks: {}", e))?;
+
+    Ok(tasks)
+}
+
+pub async fn try_lock_queue_task(pool: &SqlitePool, task_id: &str) -> Result<bool, String> {
+    let result = sqlx::query(
+        r#"
+        UPDATE automation_queue
+        SET status = 'processing'
+        WHERE id = ? AND status = 'pending'
+        "#,
+    )
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to lock queue task '{}': {}", task_id, e))?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn update_queue_task_status(
+    pool: &SqlitePool,
+    task_id: &str,
+    status: &str,
+) -> Result<bool, String> {
+    let result = sqlx::query(
+        r#"
+        UPDATE automation_queue
+        SET status = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(status)
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to update queue task status: {}", e))?;
 
     Ok(result.rows_affected() > 0)
 }

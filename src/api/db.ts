@@ -345,3 +345,117 @@ export async function generateAiRewrite(
     applyHumanizer: applyHumanizer ?? false,
   });
 }
+
+// ============================================================================
+// Local CRM & Funnel State Machine API
+// ============================================================================
+
+export type FunnelStage =
+  | 'new'
+  | 'request_sent'
+  | 'request_accepted'
+  | 'aida_attention'
+  | 'aida_interest'
+  | 'closed'
+  | 'cold';
+
+export type ActionType =
+  | 'send_friend_request'
+  | 'send_message'
+  | 'send_sticker'
+  | 'check_status';
+
+export interface Lead {
+  id: string;
+  platform: Platform;
+  external_id: string;
+  name: string;
+  funnel_stage: string;
+  last_interaction_at: number | null;
+  created_at: number;
+}
+
+export interface CreateLeadInput {
+  id?: string;
+  platform: Platform;
+  external_id: string;
+  name: string;
+  funnel_stage?: string;
+  last_interaction_at?: number | null;
+  created_at?: number;
+}
+
+export interface AutomationQueueItem {
+  id: string;
+  lead_id: string;
+  account_id: string;
+  action_type: ActionType;
+  payload: string;
+  execute_after: number;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  created_at: number;
+}
+
+export interface EnrichedAutomationQueueItem {
+  id: string;
+  lead_id: string;
+  lead_name: string;
+  platform: Platform;
+  account_id: string;
+  account_name: string;
+  action_type: ActionType;
+  payload: string;
+  execute_after: number;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  created_at: number;
+}
+
+export interface ScheduleActionInput {
+  id?: string;
+  lead_id: string;
+  account_id: string;
+  action_type: ActionType;
+  payload: string;
+  execute_after?: number | null;
+  min_delay_minutes?: number;
+  max_delay_minutes?: number;
+}
+
+export async function addLead(input: CreateLeadInput): Promise<Lead> {
+  return await safeInvoke<Lead>('add_lead', { input });
+}
+
+export async function getLeads(): Promise<Lead[]> {
+  return await safeInvoke<Lead[]>('get_leads');
+}
+
+export async function updateLeadStage(
+  id: string,
+  funnelStage: string
+): Promise<{ updated: boolean; id: string; funnel_stage: string }> {
+  return await safeInvoke('update_lead_stage', { id, funnelStage });
+}
+
+export async function deleteLead(id: string): Promise<DeleteResult> {
+  return await safeInvoke<DeleteResult>('delete_lead', { id });
+}
+
+export async function scheduleAction(
+  input: ScheduleActionInput
+): Promise<AutomationQueueItem> {
+  return await safeInvoke<AutomationQueueItem>('schedule_action', { input });
+}
+
+export async function getAutomationQueue(): Promise<EnrichedAutomationQueueItem[]> {
+  return await safeInvoke<EnrichedAutomationQueueItem[]>('get_automation_queue');
+}
+
+export async function deleteQueueItem(id: string): Promise<DeleteResult> {
+  return await safeInvoke<DeleteResult>('delete_queue_item', { id });
+}
+
+export async function markDeadLeads(
+  days?: number
+): Promise<{ marked_cold_count: number; days: number }> {
+  return await safeInvoke('mark_dead_leads', { days });
+}

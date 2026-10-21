@@ -2,7 +2,8 @@ import { useState } from 'react';
 import { AccountsView } from './components/AccountsView';
 import { PostsView } from './components/PostsView';
 import { ContentGrabberView } from './components/ContentGrabberView';
-import { Calendar, Users, Sparkles, RefreshCw, ArrowDownCircle, Rss, Bot, Terminal } from 'lucide-react';
+import { CRMView } from './components/CRMView';
+import { Calendar, Users, Sparkles, RefreshCw, ArrowDownCircle, Rss, Bot, Terminal, GitFork } from 'lucide-react';
 import { Toaster } from 'sonner';
 import { useUpdater } from './hooks/useUpdater';
 import { UpdateDialog } from './components/UpdateDialog';
@@ -11,7 +12,7 @@ import { AISettingsModal } from './components/AISettingsModal';
 import { LogTerminal } from './components/LogTerminal';
 import { useSystemLogs } from './hooks/useSystemLogs';
 
-type ActiveTab = 'posts' | 'grabber' | 'accounts';
+type ActiveTab = 'posts' | 'grabber' | 'accounts' | 'crm';
 
 export function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('posts');
@@ -87,6 +88,18 @@ export function App() {
             >
               <Users className="w-4 h-4 text-emerald-500" />
               Аккаунты
+            </button>
+
+            <button
+              onClick={() => setActiveTab('crm')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition-all ${
+                activeTab === 'crm'
+                  ? 'bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-50 shadow-xs'
+                  : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200'
+              }`}
+            >
+              <GitFork className="w-4 h-4 text-purple-500" />
+              Воронка / CRM
             </button>
           </nav>
 
@@ -169,6 +182,7 @@ export function App() {
         {activeTab === 'posts' && <PostsView />}
         {activeTab === 'grabber' && <ContentGrabberView />}
         {activeTab === 'accounts' && <AccountsView />}
+        {activeTab === 'crm' && <CRMView />}
       </main>
 
       {/* Live System Log Terminal (Bottom Drawer) */}

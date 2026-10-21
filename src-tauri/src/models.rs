@@ -316,6 +316,79 @@ impl std::fmt::Debug for CreateApiCredentialInput {
     }
 }
 
+// ==========================================
+// Local CRM & Funnel State Machine Models
+// ==========================================
+
+/// Lead entity in Local CRM
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Lead {
+    pub id: String,
+    pub platform: String,
+    pub external_id: String,
+    pub name: String,
+    pub funnel_stage: String,
+    pub last_interaction_at: Option<i64>,
+    pub created_at: i64,
+}
+
+/// Input payload for adding a new lead
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateLeadInput {
+    pub id: Option<String>,
+    pub platform: String,
+    pub external_id: String,
+    pub name: String,
+    pub funnel_stage: Option<String>,
+    pub last_interaction_at: Option<i64>,
+    pub created_at: Option<i64>,
+}
+
+/// Automation queue item for funnel tasks
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct AutomationQueueItem {
+    pub id: String,
+    pub lead_id: String,
+    pub account_id: String,
+    pub action_type: String, // 'send_friend_request', 'send_message', 'send_sticker', 'check_status'
+    pub payload: String,      // JSON string
+    pub execute_after: i64,  // Unix timestamp
+    pub status: String,       // 'pending', 'processing', 'completed', 'failed'
+    pub created_at: i64,
+}
+
+/// Enriched AutomationQueueItem with lead and account info for display
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnrichedAutomationQueueItem {
+    pub id: String,
+    pub lead_id: String,
+    pub lead_name: String,
+    pub platform: String,
+    pub account_id: String,
+    pub account_name: String,
+    pub action_type: String,
+    pub payload: String,
+    pub execute_after: i64,
+    pub status: String,
+    pub created_at: i64,
+}
+
+/// Input for scheduling an action in the automation queue
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduleActionInput {
+    pub id: Option<String>,
+    pub lead_id: String,
+    pub account_id: String,
+    pub action_type: String,
+    pub payload: String,
+    /// Explicit timestamp or None to use human-like randomized delay
+    pub execute_after: Option<i64>,
+    /// Minimum randomized delay in minutes (default: 15)
+    pub min_delay_minutes: Option<u32>,
+    /// Maximum randomized delay in minutes (default: 45)
+    pub max_delay_minutes: Option<u32>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
