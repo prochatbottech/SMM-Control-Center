@@ -2,6 +2,7 @@ pub mod commands;
 pub mod crypto;
 pub mod db;
 pub mod llm_gateway;
+pub mod logger;
 pub mod models;
 pub mod parser;
 pub mod publisher;
@@ -64,7 +65,7 @@ pub fn run() {
             .map_err(|e| format!("Database initialization failed: {}", e))?;
 
             // Invariant: Start background scheduler worker non-blocking via tokio::spawn
-            scheduler::start_worker(pool.clone());
+            scheduler::start_worker(app.handle().clone(), pool.clone());
 
             // Manage DbState for Tauri commands
             app.manage(db::DbState { pool });
@@ -407,7 +408,7 @@ mod tests {
 
         // 3. Execute one iteration of the worker
         let publisher = publisher::MockPublisher::with_delay(10);
-        let count = scheduler::process_due_posts(&pool, &publisher, Some(test_key))
+        let count = scheduler::process_due_posts(None, &pool, &publisher, Some(test_key))
             .await
             .expect("Worker execution failed");
 
@@ -464,7 +465,7 @@ mod tests {
 
         // Run with failing publisher
         let publisher = publisher::MockPublisher::failing();
-        let _ = scheduler::process_due_posts(&pool, &publisher, Some(test_key)).await;
+        let _ = scheduler::process_due_posts(None, &pool, &publisher, Some(test_key)).await;
 
         let post_after = db::get_post_by_id(&pool, &post.id).await.unwrap().unwrap();
         assert_eq!(post_after.status, "failed", "Post must be marked 'failed' when network error occurs");
@@ -558,7 +559,7 @@ mod tests {
         };
 
         // 1. First iteration: Account A succeeds, Account B fails -> Post becomes partially_published
-        let count = scheduler::process_due_posts(&pool, &publisher, Some(test_key))
+        let count = scheduler::process_due_posts(None, &pool, &publisher, Some(test_key))
             .await
             .expect("Worker iteration failed");
         assert_eq!(count, 1, "Should count partially published post as processed");
@@ -591,7 +592,7 @@ mod tests {
         // Mark post back to scheduled to simulate manual retry or rerun
         db::update_post_status(&pool, &post.id, "scheduled").await.unwrap();
 
-        let _ = scheduler::process_due_posts(&pool, &publisher, Some(test_key)).await;
+        let _ = scheduler::process_due_posts(None, &pool, &publisher, Some(test_key)).await;
 
         let counts = publisher.call_counts.lock().unwrap();
         // Invariant: Account A must NOT be re-sent because its destination status was 'published'

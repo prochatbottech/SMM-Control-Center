@@ -2,18 +2,22 @@ import { useState } from 'react';
 import { AccountsView } from './components/AccountsView';
 import { PostsView } from './components/PostsView';
 import { ContentGrabberView } from './components/ContentGrabberView';
-import { Calendar, Users, Sparkles, RefreshCw, ArrowDownCircle, Rss, Bot } from 'lucide-react';
+import { Calendar, Users, Sparkles, RefreshCw, ArrowDownCircle, Rss, Bot, Terminal } from 'lucide-react';
 import { Toaster } from 'sonner';
 import { useUpdater } from './hooks/useUpdater';
 import { UpdateDialog } from './components/UpdateDialog';
 import { AutostartToggle } from './components/AutostartToggle';
 import { AISettingsModal } from './components/AISettingsModal';
+import { LogTerminal } from './components/LogTerminal';
+import { useSystemLogs } from './hooks/useSystemLogs';
 
 type ActiveTab = 'posts' | 'grabber' | 'accounts';
 
 export function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('posts');
   const [showAISettings, setShowAISettings] = useState(false);
+  const [isTerminalOpen, setIsTerminalOpen] = useState(false);
+  const { logs, clearLogs, errorCount, warnCount } = useSystemLogs();
   const {
     isChecking,
     isDownloading,
@@ -97,6 +101,29 @@ export function App() {
               <span>AI Ключи</span>
             </button>
 
+            {/* Live Console Terminal Toggle Button */}
+            <button
+              onClick={() => setIsTerminalOpen(!isTerminalOpen)}
+              title="Открыть терминал системных логов"
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
+                isTerminalOpen
+                  ? 'bg-zinc-800 text-emerald-400 border-zinc-700 shadow-xs'
+                  : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 bg-zinc-100/80 dark:bg-zinc-800/80 hover:bg-zinc-200/80 dark:hover:bg-zinc-700/80 rounded-lg border-zinc-200/60 dark:border-zinc-700/60'
+              }`}
+            >
+              <Terminal className="w-3.5 h-3.5 text-emerald-500" />
+              <span className="hidden sm:inline">Консоль</span>
+              {errorCount > 0 ? (
+                <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono bg-rose-500 text-white font-bold animate-pulse">
+                  {errorCount}
+                </span>
+              ) : logs.length > 0 ? (
+                <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono bg-zinc-700 text-zinc-300">
+                  {logs.length}
+                </span>
+              ) : null}
+            </button>
+
             <AutostartToggle compact />
 
             <button
@@ -138,11 +165,21 @@ export function App() {
       </header>
 
       {/* Main Content Area */}
-      <main className="flex-1 max-w-6xl w-full mx-auto p-6 md:p-10">
+      <main className="flex-1 max-w-6xl w-full mx-auto p-6 md:p-10 pb-16 md:pb-24">
         {activeTab === 'posts' && <PostsView />}
         {activeTab === 'grabber' && <ContentGrabberView />}
         {activeTab === 'accounts' && <AccountsView />}
       </main>
+
+      {/* Live System Log Terminal (Bottom Drawer) */}
+      <LogTerminal
+        logs={logs}
+        onClear={clearLogs}
+        isOpen={isTerminalOpen}
+        onToggle={() => setIsTerminalOpen(!isTerminalOpen)}
+        errorCount={errorCount}
+        warnCount={warnCount}
+      />
 
       {/* AI Settings Modal */}
       <AISettingsModal

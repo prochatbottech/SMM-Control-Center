@@ -3,13 +3,16 @@ use sqlx::SqlitePool;
 use zeroize::Zeroize;
 use crate::crypto;
 use crate::db;
+use crate::logger;
 use crate::publisher::{PostPublisher, RealPublisher};
 
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Run one iteration of processing all due scheduled posts.
 /// Returns the number of successfully published posts.
+/// Accepts optional AppHandle to emit live system events to the frontend.
 pub async fn process_due_posts<P: PostPublisher>(
+    app: Option<&tauri::AppHandle>,
     pool: &SqlitePool,
     publisher: &P,
     key_override: Option<[u8; 32]>,
@@ -21,7 +24,11 @@ pub async fn process_due_posts<P: PostPublisher>(
         return Ok(0);
     }
 
-    println!("[Scheduler] Found {} due post(s) for publishing", due_posts.len());
+    logger::emit_log_opt(
+        app,
+        "info",
+        &format!("Найдено {} пост(ов), готовых к публикации", due_posts.len()),
+    );
     let mut published_count = 0;
 
     for post in due_posts {
@@ -29,20 +36,26 @@ pub async fn process_due_posts<P: PostPublisher>(
         // If 0 rows affected, another process or thread already locked it -> skip.
         let locked = db::try_lock_post_for_publishing(pool, &post.id).await?;
         if !locked {
-            println!(
-                "[Scheduler] Post '{}' was already locked or state changed, skipping",
-                post.id
+            logger::emit_log_opt(
+                app,
+                "info",
+                &format!("Пост '{}' уже заблокирован другим процессом, пропуск", post.id),
             );
             continue;
         }
 
-        println!("[Scheduler] Post '{}' locked into 'publishing' status", post.id);
+        logger::emit_log_opt(
+            app,
+            "info",
+            &format!("Пост '{}' заблокирован для публикации (статус 'publishing')", post.id),
+        );
 
         // Edge case: Post must have destination accounts
         if post.destination_account_ids.is_empty() {
-            eprintln!(
-                "[Scheduler] Post '{}' has no destination accounts, marking as failed",
-                post.id
+            logger::emit_log_opt(
+                app,
+                "warn",
+                &format!("Пост '{}' не имеет целевых аккаунтов, перевод в статус 'failed'", post.id),
             );
             db::update_post_status(pool, &post.id, "failed").await?;
             continue;
@@ -59,9 +72,10 @@ pub async fn process_due_posts<P: PostPublisher>(
         let master_key = match master_key {
             Ok(k) => k,
             Err(err_msg) => {
-                eprintln!(
-                    "[Scheduler] Error obtaining master key for post '{}': {}, marking as failed",
-                    post.id, err_msg
+                logger::emit_log_opt(
+                    app,
+                    "error",
+                    &format!("Пост '{}': ошибка получения мастер-ключа: {}, перевод в 'failed'", post.id, err_msg),
                 );
                 db::update_post_status(pool, &post.id, "failed").await?;
                 continue;
@@ -74,9 +88,10 @@ pub async fn process_due_posts<P: PostPublisher>(
 
         for dest in destinations {
             if dest.status == "published" {
-                println!(
-                    "[Scheduler] Account destination '{}' on post '{}' is already 'published', skipping",
-                    dest.account_id, post.id
+                logger::emit_log_opt(
+                    app,
+                    "info",
+                    &format!("Аккаунт destination '{}' для поста '{}' уже опубликован, пропуск", dest.account_id, post.id),
                 );
                 continue;
             }
@@ -84,9 +99,10 @@ pub async fn process_due_posts<P: PostPublisher>(
             let account = match db::get_account_by_id(pool, &dest.account_id).await? {
                 Some(acc) => acc,
                 None => {
-                    eprintln!(
-                        "[Scheduler] Target account '{}' not found for post '{}'",
-                        dest.account_id, post.id
+                    logger::emit_log_opt(
+                        app,
+                        "error",
+                        &format!("Целевой аккаунт '{}' для поста '{}' не найден в базе данных", dest.account_id, post.id),
                     );
                     db::update_destination_status(
                         pool,
@@ -104,9 +120,10 @@ pub async fn process_due_posts<P: PostPublisher>(
             let mut plain_token = match crypto::decrypt_token(&account.encrypted_token, &master_key) {
                 Ok(token) => token,
                 Err(e) => {
-                    eprintln!(
-                        "[Scheduler] Failed to decrypt token for account '{}' on post '{}': {}",
-                        account.name, post.id, e
+                    logger::emit_log_opt(
+                        app,
+                        "error",
+                        &format!("Ошибка расшифровки токена для аккаунта '{}' (пост '{}'): {}", account.name, post.id, e),
                     );
                     db::update_destination_status(
                         pool,
@@ -119,6 +136,12 @@ pub async fn process_due_posts<P: PostPublisher>(
                     continue;
                 }
             };
+
+            logger::emit_log_opt(
+                app,
+                "info",
+                &format!("Отправка поста '{}' в {} ('{}')...", post.id, account.platform.to_uppercase(), account.name),
+            );
 
             // Publish via connector
             let publish_result = publisher
@@ -134,9 +157,10 @@ pub async fn process_due_posts<P: PostPublisher>(
             // Invariant: Secret Redaction 2.0 & Log limit (max 500 characters)
             match publish_result {
                 Ok(external_id) => {
-                    println!(
-                        "[Scheduler] Successfully published post '{}' to account '{}' (id: {})",
-                        post.id, account.name, external_id
+                    logger::emit_log_opt(
+                        app,
+                        "success",
+                        &format!("Успешно опубликован пост '{}' в {} ('{}') (ID: {})", post.id, account.platform.to_uppercase(), account.name, external_id),
                     );
                     db::update_destination_status(
                         pool,
@@ -152,9 +176,10 @@ pub async fn process_due_posts<P: PostPublisher>(
                     let sanitized = raw_error.replace(&plain_token, "[REDACTED]");
                     // Truncate to at most 500 characters safely
                     let final_log: String = sanitized.chars().take(500).collect();
-                    eprintln!(
-                        "[Scheduler] Publishing failed for account '{}' on post '{}': {}",
-                        account.name, post.id, final_log
+                    logger::emit_log_opt(
+                        app,
+                        "error",
+                        &format!("Ошибка публикации в {} ('{}'): {}", account.platform.to_uppercase(), account.name, final_log),
                     );
                     db::update_destination_status(
                         pool,
@@ -191,9 +216,18 @@ pub async fn process_due_posts<P: PostPublisher>(
         };
 
         db::update_post_status(pool, &post.id, final_status).await?;
-        println!(
-            "[Scheduler] Post '{}' status updated to '{}' (published: {}/{}, failed: {})",
-            post.id, final_status, published_dests, total, failed_dests
+        let level = match final_status {
+            "published" => "success",
+            "partially_published" => "warn",
+            _ => "error",
+        };
+        logger::emit_log_opt(
+            app,
+            level,
+            &format!(
+                "Пост '{}' переведен в статус '{}' (успешно: {}/{}, ошибок: {})",
+                post.id, final_status, published_dests, total, failed_dests
+            ),
         );
 
         if final_status == "published" || final_status == "partially_published" {
@@ -206,17 +240,26 @@ pub async fn process_due_posts<P: PostPublisher>(
 
 /// Start the background worker inside Tokio runtime.
 /// Invariant: Non-blocking via `tauri::async_runtime::spawn`.
-pub fn start_worker(pool: SqlitePool) {
+/// Accepts AppHandle to emit live system logs to the React UI.
+pub fn start_worker(app: tauri::AppHandle, pool: SqlitePool) {
     tauri::async_runtime::spawn(async move {
         let publisher = RealPublisher::new();
-        println!(
-            "[Scheduler] Background worker started with {:?} polling interval (RealPublisher)",
-            DEFAULT_POLL_INTERVAL
+        logger::emit_log(
+            &app,
+            "info",
+            &format!(
+                "Фоновый воркер планировщика запущен (интервал: {:?})",
+                DEFAULT_POLL_INTERVAL
+            ),
         );
 
         loop {
-            if let Err(e) = process_due_posts(&pool, &publisher, None).await {
-                eprintln!("[Scheduler] Background worker error: {}", e);
+            if let Err(e) = process_due_posts(Some(&app), &pool, &publisher, None).await {
+                logger::emit_log(
+                    &app,
+                    "error",
+                    &format!("Ошибка цикла планировщика: {}", e),
+                );
             }
             tokio::time::sleep(DEFAULT_POLL_INTERVAL).await;
         }
