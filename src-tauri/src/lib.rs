@@ -1,6 +1,7 @@
 pub mod automation_worker;
 pub mod commands;
 pub mod crm;
+pub mod crm_connectors;
 pub mod crypto;
 pub mod db;
 pub mod funnel_prompts;
@@ -837,6 +838,9 @@ mod tests {
         let temp_dir = tempdir().expect("Failed to create temp dir");
         let pool = db::init_db(temp_dir.path()).await.expect("Failed to init db");
 
+        let test_master_key = [33u8; 32];
+        let enc_token = crypto::encrypt_token("vk_token_123", &test_master_key).unwrap();
+
         // 1. Create account
         let acc = db::create_account(
             &pool,
@@ -844,7 +848,7 @@ mod tests {
                 id: None,
                 platform: "vk".to_string(),
                 name: "VK Seller".to_string(),
-                encrypted_token: "encrypted".to_string(),
+                encrypted_token: enc_token,
                 created_at: None,
             },
         )
@@ -896,11 +900,32 @@ mod tests {
         .await
         .unwrap();
 
-        // 4. Run automation worker iteration
+        // 4. Run automation worker iteration with mock connector
+        struct MockCrmConnector;
+        impl crm_connectors::CrmConnector for MockCrmConnector {
+            async fn execute_action(
+                &self,
+                platform: &str,
+                _token: &str,
+                _external_id: &str,
+                _action_type: &str,
+                _payload: &str,
+            ) -> Result<String, String> {
+                Ok(format!("{}_ok", platform))
+            }
+        }
+
         let limiter = automation_worker::AutomationRateLimiter::new();
-        let executed = automation_worker::process_due_automation_tasks(None, &pool, &limiter)
-            .await
-            .expect("Execution failed");
+        let connector = MockCrmConnector;
+        let executed = automation_worker::process_due_automation_tasks_with_connector(
+            None,
+            &pool,
+            &limiter,
+            &connector,
+            Some(test_master_key),
+        )
+        .await
+        .expect("Execution failed");
 
         // Invariant: Rate Limiter permits exactly 1 action per minute per account!
         assert_eq!(executed, 1, "Global Rate Limiter must allow only 1 action per minute for account");

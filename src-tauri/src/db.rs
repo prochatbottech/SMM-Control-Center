@@ -868,6 +868,27 @@ pub async fn update_lead_stage(
     Ok(result.rows_affected() > 0)
 }
 
+pub async fn update_lead_interaction(
+    pool: &SqlitePool,
+    id: &str,
+    timestamp: i64,
+) -> Result<bool, String> {
+    let result = sqlx::query(
+        r#"
+        UPDATE leads
+        SET last_interaction_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(timestamp)
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to update lead interaction: {}", e))?;
+
+    Ok(result.rows_affected() > 0)
+}
+
 pub async fn delete_lead(pool: &SqlitePool, id: &str) -> Result<bool, String> {
     let result = sqlx::query("DELETE FROM leads WHERE id = ?")
         .bind(id)
