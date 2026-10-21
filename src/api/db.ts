@@ -262,3 +262,83 @@ export interface ParsedItem {
 export async function parseContentSource(url: string): Promise<ParsedItem[]> {
   return await safeInvoke<ParsedItem[]>('parse_content_source', { url });
 }
+
+// ============================================================================
+// LLM API Credentials & AI Rewrite API
+// ============================================================================
+
+export type ApiCredentialProvider = 'openai_compat' | 'anthropic';
+
+/**
+ * API Credential entity matching `api_credentials` table in SQLite
+ * INVARIANT: Real and encrypted keys are never exposed on frontend.
+ * Display uses `masked_key` (e.g. "sk-...f3a2").
+ */
+export interface ApiCredential {
+  id: string; // UUID
+  provider: ApiCredentialProvider;
+  name: string;
+  base_url: string;
+  encrypted_key?: string | null;
+  masked_key?: string;
+  created_at: number; // Unix timestamp in seconds
+}
+
+/**
+ * Input for registering a new LLM API Key
+ */
+export interface CreateApiCredentialInput {
+  id?: string;
+  provider: ApiCredentialProvider;
+  name: string;
+  base_url: string;
+  api_key: string;
+  created_at?: number;
+}
+
+/**
+ * Retrieve all registered LLM API credentials with masked keys.
+ */
+export async function getApiCredentials(): Promise<ApiCredential[]> {
+  return await safeInvoke<ApiCredential[]>('get_api_credentials');
+}
+
+/**
+ * Register a new LLM API credential.
+ * The key is encrypted with AES-256-GCM via the OS Keyring master key.
+ */
+export async function createApiCredential(
+  input: CreateApiCredentialInput
+): Promise<ApiCredential> {
+  return await safeInvoke<ApiCredential>('create_api_credential', { input });
+}
+
+/**
+ * Delete an API credential by its UUID.
+ */
+export async function deleteApiCredential(id: string): Promise<DeleteResult> {
+  return await safeInvoke<DeleteResult>('delete_api_credential', { id });
+}
+
+/**
+ * Generate AI rewrite for post text using the LLM Gateway
+ *
+ * @param text The input post text to rewrite
+ * @param promptInstruction User instruction (e.g. "Make it more engaging with emojis")
+ * @param modelName Target model identifier (e.g. "gpt-4o-mini", "claude-3-5-sonnet-20241022")
+ * @param credentialId ID of the credential to use
+ * @returns Rewritten text from the LLM
+ */
+export async function generateAiRewrite(
+  text: string,
+  promptInstruction: string,
+  modelName: string,
+  credentialId: string
+): Promise<string> {
+  return await safeInvoke<string>('generate_ai_rewrite', {
+    text,
+    promptInstruction,
+    modelName,
+    credentialId,
+  });
+}

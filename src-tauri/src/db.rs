@@ -5,12 +5,14 @@ use sqlx::{
 };
 use uuid::Uuid;
 use crate::models::{
-    Account, CreateAccountInput, CreatePostInput, DestinationInfo, Post, PostRow, PostStatus,
+    Account, ApiCredential, CreateAccountInput, CreatePostInput, DestinationInfo, Post, PostRow,
+    PostStatus,
 };
 
 pub const DB_FILE_NAME: &str = "smm_local.db";
 pub const MIGRATION_01_SQL: &str = include_str!("../migrations/01_initial.sql");
 pub const MIGRATION_02_SQL: &str = include_str!("../migrations/02_add_destinations_status.sql");
+pub const MIGRATION_03_SQL: &str = include_str!("../migrations/03_api_credentials.sql");
 pub const INITIAL_MIGRATION_SQL: &str = MIGRATION_01_SQL;
 
 /// Holds the SQLite connection pool as Tauri managed state
@@ -116,6 +118,24 @@ pub async fn apply_migrations(pool: &SqlitePool) -> Result<(), String> {
             .execute(pool)
             .await
             .map_err(|e| format!("Failed to record migration 02: {}", e))?;
+    }
+
+    // Migration 03
+    if !applied_versions.contains(&3) {
+        for statement in MIGRATION_03_SQL.split(';') {
+            let trimmed = statement.trim();
+            if !trimmed.is_empty() {
+                sqlx::query(trimmed)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| format!("Migration 03 statement failed ({}): {}", trimmed, e))?;
+            }
+        }
+        sqlx::query("INSERT INTO _schema_migrations (version, applied_at) VALUES (3, ?)")
+            .bind(chrono::Utc::now().timestamp())
+            .execute(pool)
+            .await
+            .map_err(|e| format!("Failed to record migration 03: {}", e))?;
     }
 
     Ok(())
@@ -592,4 +612,122 @@ pub async fn retry_post(pool: &SqlitePool, post_id: &str) -> Result<(), String> 
         .map_err(|e| format!("Failed to reset destination status for retry: {}", e))?;
 
     Ok(())
+}
+
+// ==========================================
+// API Credentials Operations (LLM Gateway)
+// ==========================================
+
+pub async fn create_api_credential(
+    pool: &SqlitePool,
+    id: Option<String>,
+    provider: &str,
+    name: &str,
+    base_url: &str,
+    encrypted_key: &str,
+    created_at: Option<i64>,
+) -> Result<ApiCredential, String> {
+    let provider = provider.trim();
+    if provider != "openai_compat" && provider != "anthropic" {
+        return Err(format!(
+            "Invalid provider '{}'. Supported providers are 'openai_compat' or 'anthropic'",
+            provider
+        ));
+    }
+
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Credential 'name' cannot be empty".to_string());
+    }
+
+    let base_url = base_url.trim();
+    if base_url.is_empty() {
+        return Err("Credential 'base_url' cannot be empty".to_string());
+    }
+
+    let encrypted_key = encrypted_key.trim();
+    if encrypted_key.is_empty() {
+        return Err("Credential key cannot be empty".to_string());
+    }
+
+    let id = match id {
+        Some(ref id_str) => {
+            Uuid::parse_str(id_str)
+                .map_err(|e| format!("Invalid UUID for credential id '{}': {}", id_str, e))?
+                .to_string()
+        }
+        None => Uuid::new_v4().to_string(),
+    };
+
+    let created_at = created_at.unwrap_or_else(|| chrono::Utc::now().timestamp());
+
+    sqlx::query(
+        r#"
+        INSERT INTO api_credentials (id, provider, name, base_url, encrypted_key, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(&id)
+    .bind(provider)
+    .bind(name)
+    .bind(base_url)
+    .bind(encrypted_key)
+    .bind(created_at)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to insert api credential: {}", e))?;
+
+    Ok(ApiCredential {
+        id,
+        provider: provider.to_string(),
+        name: name.to_string(),
+        base_url: base_url.to_string(),
+        encrypted_key: encrypted_key.to_string(),
+        created_at,
+        masked_key: None,
+    })
+}
+
+pub async fn get_api_credentials(pool: &SqlitePool) -> Result<Vec<ApiCredential>, String> {
+    let creds = sqlx::query_as::<_, ApiCredential>(
+        r#"
+        SELECT id, provider, name, base_url, encrypted_key, created_at
+        FROM api_credentials
+        ORDER BY created_at DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to fetch api credentials: {}", e))?;
+
+    Ok(creds)
+}
+
+pub async fn get_api_credential_by_id(
+    pool: &SqlitePool,
+    id: &str,
+) -> Result<Option<ApiCredential>, String> {
+    let cred = sqlx::query_as::<_, ApiCredential>(
+        r#"
+        SELECT id, provider, name, base_url, encrypted_key, created_at
+        FROM api_credentials
+        WHERE id = ?
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Failed to fetch api credential by id '{}': {}", id, e))?;
+
+    Ok(cred)
+}
+
+pub async fn delete_api_credential(pool: &SqlitePool, id: &str) -> Result<bool, String> {
+    let result = sqlx::query("DELETE FROM api_credentials WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to delete api credential '{}': {}", id, e))?;
+
+    Ok(result.rows_affected() > 0)
 }

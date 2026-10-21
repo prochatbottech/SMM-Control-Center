@@ -1,8 +1,10 @@
 use tauri::State;
 use serde_json::Value as JsonValue;
+use zeroize::{Zeroize, Zeroizing};
 use crate::crypto;
 use crate::db::{self, DbState};
-use crate::models::{CreateAccountInput, CreatePostInput};
+use crate::llm_gateway;
+use crate::models::{self, CreateAccountInput, CreateApiCredentialInput, CreatePostInput};
 
 /// Tauri Command: Create a new account
 /// Invariant: Plain token is encrypted via AES-256-GCM before writing to SQLite.
@@ -119,4 +121,132 @@ pub async fn retry_post(
 #[tauri::command]
 pub async fn parse_content_source(url: String) -> Result<Vec<crate::parser::ParsedItem>, String> {
     crate::parser::parse_content_source(&url).await
+}
+
+// ==========================================
+// LLM API Credentials & AI Commands
+// ==========================================
+
+/// Tauri Command: Register or create an API Credential
+/// Invariant: Plain API key is encrypted via AES-256-GCM before writing to SQLite.
+/// Output has masked_key populated; encrypted_key is excluded from frontend serialization.
+#[tauri::command]
+pub async fn create_api_credential(
+    state: State<'_, DbState>,
+    input: CreateApiCredentialInput,
+) -> Result<JsonValue, String> {
+    let mut raw_key = Zeroizing::new(input.api_key.trim().to_string());
+    if raw_key.is_empty() {
+        return Err("API key cannot be empty".to_string());
+    }
+
+    let mask = models::mask_api_key(&raw_key);
+
+    let master_key = crypto::get_or_generate_key().map_err(|e| e.to_string())?;
+    let encrypted = crypto::encrypt_token(&raw_key, &master_key).map_err(|e| e.to_string())?;
+
+    // Zeroize plain key from memory
+    raw_key.zeroize();
+
+    let cred = db::create_api_credential(
+        &state.pool,
+        input.id,
+        &input.provider,
+        &input.name,
+        &input.base_url,
+        &encrypted,
+        input.created_at,
+    )
+    .await?;
+
+    let safe_cred = cred.with_masked_key(mask);
+    serde_json::to_value(&safe_cred).map_err(|e| format!("Serialization error: {}", e))
+}
+
+/// Tauri Command: Retrieve all registered API Credentials
+/// Invariant: Frontend isolation: real and encrypted keys are NEVER sent to the frontend.
+/// Decrypts in memory only to compute masked_key and zeroizes memory immediately.
+#[tauri::command]
+pub async fn get_api_credentials(state: State<'_, DbState>) -> Result<JsonValue, String> {
+    let creds = db::get_api_credentials(&state.pool).await?;
+    let master_key = crypto::get_or_generate_key().map_err(|e| e.to_string())?;
+
+    let mut safe_creds = Vec::with_capacity(creds.len());
+    for cred in creds {
+        let mask = match crypto::decrypt_token(&cred.encrypted_key, &master_key) {
+            Ok(mut decrypted) => {
+                let m = models::mask_api_key(&decrypted);
+                decrypted.zeroize();
+                m
+            }
+            Err(_) => "***".to_string(),
+        };
+
+        safe_creds.push(cred.with_masked_key(mask));
+    }
+
+    serde_json::to_value(&safe_creds).map_err(|e| format!("Serialization error: {}", e))
+}
+
+/// Tauri Command: Delete an API Credential by UUID
+#[tauri::command]
+pub async fn delete_api_credential(
+    state: State<'_, DbState>,
+    id: String,
+) -> Result<JsonValue, String> {
+    let deleted = db::delete_api_credential(&state.pool, &id).await?;
+    Ok(serde_json::json!({
+        "deleted": deleted,
+        "id": id
+    }))
+}
+
+/// Tauri Command: Generate AI Rewrite for post text
+/// Invariant: Memory safety (zeroize decrypted key), error redaction, meta-prompt enforcement.
+#[tauri::command]
+pub async fn generate_ai_rewrite(
+    state: State<'_, DbState>,
+    text: String,
+    prompt_instruction: String,
+    model_name: String,
+    credential_id: String,
+) -> Result<String, String> {
+    let user_text = text.trim();
+    if user_text.is_empty() {
+        return Err("Текст для обработки не может быть пустым".to_string());
+    }
+
+    let model = model_name.trim();
+    if model.is_empty() {
+        return Err("Название модели не может быть пустым".to_string());
+    }
+
+    // 1. Fetch credential
+    let maybe_cred = db::get_api_credential_by_id(&state.pool, &credential_id).await?;
+    let cred = maybe_cred.ok_or_else(|| format!("API Credential '{}' not found", credential_id))?;
+
+    // 2. Decrypt API Key
+    let master_key = crypto::get_or_generate_key().map_err(|e| e.to_string())?;
+    let decrypted = crypto::decrypt_token(&cred.encrypted_key, &master_key)
+        .map_err(|e| format!("Failed to decrypt API key: {}", e))?;
+    let raw_key = Zeroizing::new(decrypted);
+
+    // 3. System meta-prompt
+    let base_meta_prompt = "Ты профессиональный SMM-копирайтер. Твоя задача — улучшить или переписать предоставленный текст по инструкции пользователя. Сохраняй факты, не добавляй отсебятины и не веди диалог (возвращай ТОЛЬКО финальный текст поста).";
+    let sys_prompt = if prompt_instruction.trim().is_empty() {
+        base_meta_prompt.to_string()
+    } else {
+        format!("{}\nИнструкция: {}", base_meta_prompt, prompt_instruction.trim())
+    };
+
+    // 4. Invoke LLM Gateway
+    llm_gateway::send_completion(
+        &cred.provider,
+        &cred.base_url,
+        raw_key,
+        model,
+        &sys_prompt,
+        user_text,
+    )
+    .await
 }

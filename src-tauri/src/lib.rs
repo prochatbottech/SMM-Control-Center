@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod crypto;
 pub mod db;
+pub mod llm_gateway;
 pub mod models;
 pub mod parser;
 pub mod publisher;
@@ -25,6 +26,12 @@ pub fn run() {
             version: 2,
             description: "add_destinations_status_and_logs",
             sql: db::MIGRATION_02_SQL,
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 3,
+            description: "create_api_credentials_table",
+            sql: db::MIGRATION_03_SQL,
             kind: MigrationKind::Up,
         },
     ];
@@ -138,7 +145,11 @@ pub fn run() {
             commands::get_posts,
             commands::delete_post,
             commands::retry_post,
-            commands::parse_content_source
+            commands::parse_content_source,
+            commands::create_api_credential,
+            commands::get_api_credentials,
+            commands::delete_api_credential,
+            commands::generate_ai_rewrite
         ]);
 
     #[allow(unused_mut)]
@@ -629,5 +640,77 @@ mod tests {
         };
         let res = db::create_post(&pool, invalid_scheduled).await;
         assert!(res.is_err(), "Scheduled post with whitespace content must be rejected");
+    }
+
+    #[tokio::test]
+    async fn test_api_credentials_crud_and_encryption() {
+        let temp_dir = tempdir().expect("Failed to create temp dir");
+        let pool = db::init_db(temp_dir.path()).await.expect("Failed to init db");
+
+        let test_master_key = [42u8; 32];
+        let raw_api_key = "sk-proj-1234567890abcdef12345678";
+        let encrypted_key = crypto::encrypt_token(raw_api_key, &test_master_key).unwrap();
+
+        // 1. Create API credential
+        let cred = db::create_api_credential(
+            &pool,
+            None,
+            "openai_compat",
+            "OpenAI Main",
+            "https://api.openai.com/v1",
+            &encrypted_key,
+            None,
+        )
+        .await
+        .expect("Creation must succeed");
+
+        assert_eq!(cred.name, "OpenAI Main");
+        assert_eq!(cred.provider, "openai_compat");
+        assert_eq!(cred.base_url, "https://api.openai.com/v1");
+
+        // 2. Query all credentials
+        let list = db::get_api_credentials(&pool).await.expect("Query must succeed");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, cred.id);
+
+        // 3. Verify raw key in SQLite is encrypted and never plain
+        let db_encrypted: String = sqlx::query_scalar("SELECT encrypted_key FROM api_credentials WHERE id = ?")
+            .bind(&cred.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(db_encrypted, encrypted_key);
+        assert_ne!(db_encrypted, raw_api_key);
+
+        // 4. Decrypt back
+        let decrypted = crypto::decrypt_token(&db_encrypted, &test_master_key).unwrap();
+        assert_eq!(decrypted, raw_api_key);
+
+        // 5. Invariant: Frontend isolation: real and encrypted key omitted from JSON serialization
+        let masked = models::mask_api_key(&decrypted);
+        assert_eq!(masked, "sk-...5678");
+
+        let safe_cred = cred.with_masked_key(masked);
+        let val = serde_json::to_value(&safe_cred).unwrap();
+        let obj = val.as_object().unwrap();
+
+        assert!(!obj.contains_key("encrypted_key"), "encrypted_key must be skipped in JSON serialization");
+        assert_eq!(obj.get("masked_key").and_then(|v| v.as_str()), Some("sk-...5678"));
+
+        // 6. Delete credential
+        let deleted = db::delete_api_credential(&pool, &safe_cred.id).await.unwrap();
+        assert!(deleted);
+
+        let list_after = db::get_api_credentials(&pool).await.unwrap();
+        assert_eq!(list_after.len(), 0);
+    }
+
+    #[test]
+    fn test_mask_api_key_varieties() {
+        assert_eq!(models::mask_api_key("sk-1234567890abcdef"), "sk-...cdef");
+        assert_eq!(models::mask_api_key("sk-ant-api03-1234"), "sk-...1234");
+        assert_eq!(models::mask_api_key("short"), "***");
+        assert_eq!(models::mask_api_key("1234567"), "***");
+        assert_eq!(models::mask_api_key("12345678"), "123...5678");
     }
 }

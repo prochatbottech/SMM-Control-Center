@@ -240,6 +240,82 @@ pub struct PostDestination {
     pub error_log: Option<String>,
 }
 
+/// Helper function to create a masked representation of an API key
+pub fn mask_api_key(raw_key: &str) -> String {
+    let len = raw_key.len();
+    if len <= 7 {
+        "***".to_string()
+    } else {
+        let prefix = &raw_key[..std::cmp::min(3, len)];
+        let suffix = &raw_key[len.saturating_sub(4)..];
+        format!("{}...{}", prefix, suffix)
+    }
+}
+
+/// LLM API Credential entity matching `api_credentials` table
+#[derive(Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ApiCredential {
+    pub id: String,
+    pub provider: String,
+    pub name: String,
+    pub base_url: String,
+    /// Invariant: NEVER serialize raw or encrypted key to frontend
+    #[serde(skip_serializing)]
+    pub encrypted_key: String,
+    pub created_at: i64,
+    /// Masked representation for frontend display (e.g. "sk-...f3a2")
+    #[serde(skip_deserializing)]
+    #[sqlx(default)]
+    pub masked_key: Option<String>,
+}
+
+impl ApiCredential {
+    pub fn with_masked_key(mut self, masked: String) -> Self {
+        self.masked_key = Some(masked);
+        self
+    }
+}
+
+/// Invariant: Redact encrypted_key in logs and debug printing
+impl std::fmt::Debug for ApiCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiCredential")
+            .field("id", &self.id)
+            .field("provider", &self.provider)
+            .field("name", &self.name)
+            .field("base_url", &self.base_url)
+            .field("encrypted_key", &"[REDACTED]")
+            .field("created_at", &self.created_at)
+            .field("masked_key", &self.masked_key)
+            .finish()
+    }
+}
+
+/// Input payload for creating or registering an API Credential
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CreateApiCredentialInput {
+    pub id: Option<String>,
+    pub provider: String,
+    pub name: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub created_at: Option<i64>,
+}
+
+/// Invariant: Redact raw api_key in logs and debug printing
+impl std::fmt::Debug for CreateApiCredentialInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateApiCredentialInput")
+            .field("id", &self.id)
+            .field("provider", &self.provider)
+            .field("name", &self.name)
+            .field("base_url", &self.base_url)
+            .field("api_key", &"[REDACTED]")
+            .field("created_at", &self.created_at)
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2,16 +2,18 @@ import { useState } from 'react';
 import { AccountsView } from './components/AccountsView';
 import { PostsView } from './components/PostsView';
 import { ContentGrabberView } from './components/ContentGrabberView';
-import { Calendar, Users, Sparkles, RefreshCw, ArrowDownCircle, Rss } from 'lucide-react';
+import { Calendar, Users, Sparkles, RefreshCw, ArrowDownCircle, Rss, Bot } from 'lucide-react';
 import { Toaster } from 'sonner';
 import { useUpdater } from './hooks/useUpdater';
 import { UpdateDialog } from './components/UpdateDialog';
 import { AutostartToggle } from './components/AutostartToggle';
+import { AISettingsModal } from './components/AISettingsModal';
 
 type ActiveTab = 'posts' | 'grabber' | 'accounts';
 
 export function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('posts');
+  const [showAISettings, setShowAISettings] = useState(false);
   const {
     isChecking,
     isDownloading,
@@ -86,6 +88,15 @@ export function App() {
 
           {/* Right Header Section: Autostart, Updater & Tokio Worker Status */}
           <div className="flex items-center gap-3">
+            <button
+              onClick={() => setShowAISettings(true)}
+              title="Настройки нейросетей и LLM API ключей"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-purple-700 dark:text-purple-300 bg-purple-500/10 hover:bg-purple-500/20 rounded-lg border border-purple-500/30 transition-colors"
+            >
+              <Bot className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />
+              <span>AI Ключи</span>
+            </button>
+
             <AutostartToggle compact />
 
             <button
@@ -132,6 +143,12 @@ export function App() {
         {activeTab === 'grabber' && <ContentGrabberView />}
         {activeTab === 'accounts' && <AccountsView />}
       </main>
+
+      {/* AI Settings Modal */}
+      <AISettingsModal
+        isOpen={showAISettings}
+        onClose={() => setShowAISettings(false)}
+      />
 
       {/* Update Dialog Modal */}
       <UpdateDialog
