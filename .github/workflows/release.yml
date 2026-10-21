@@ -1,3 +1,4 @@
+# SMM Control Center Release Pipeline
 name: 'Release'
 
 on:
