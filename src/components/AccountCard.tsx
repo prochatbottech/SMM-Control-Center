@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { Account } from '../api/db';
 import { useDeleteAccountMutation } from '../hooks/useAccounts';
+import { ConfirmDialog } from './ConfirmDialog';
 import { toast } from 'sonner';
 
 interface AccountCardProps {
@@ -19,19 +20,19 @@ interface AccountCardProps {
 
 export const AccountCard: React.FC<AccountCardProps> = ({ account }) => {
   const deleteMutation = useDeleteAccountMutation();
+  const [confirmDelete, setConfirmDelete] = React.useState(false);
 
   const handleDelete = () => {
-    if (confirm(`Вы уверены, что хотите удалить аккаунт "${account.name}"?`)) {
-      deleteMutation.mutate(account.id, {
-        onSuccess: () => {
-          toast.success(`Аккаунт "${account.name}" успешно удален`);
-        },
-        onError: (err: any) => {
-          const msg = typeof err === 'string' ? err : err?.message || String(err);
-          toast.error(`Ошибка при удалении: ${msg}`);
-        },
-      });
-    }
+    deleteMutation.mutate(account.id, {
+      onSuccess: () => {
+        toast.success(`Аккаунт "${account.name}" успешно удален`);
+        setConfirmDelete(false);
+      },
+      onError: (err: any) => {
+        const msg = typeof err === 'string' ? err : err?.message || String(err);
+        toast.error(`Ошибка при удалении: ${msg}`);
+      },
+    });
   };
 
   const getPlatformMeta = (platform: string) => {
@@ -101,7 +102,7 @@ export const AccountCard: React.FC<AccountCardProps> = ({ account }) => {
           </div>
 
           <button
-            onClick={handleDelete}
+            onClick={() => setConfirmDelete(true)}
             disabled={deleteMutation.isPending}
             title="Удалить аккаунт"
             className="p-2 text-zinc-400 hover:text-red-500 hover:bg-red-500/10 dark:hover:bg-red-500/20 rounded-lg transition-colors disabled:opacity-50"
@@ -133,6 +134,15 @@ export const AccountCard: React.FC<AccountCardProps> = ({ account }) => {
         <Calendar className="w-3.5 h-3.5 mr-1.5" />
         <span>Подключен {createdDate}</span>
       </div>
+
+      <ConfirmDialog
+        open={confirmDelete}
+        title="Удалить аккаунт?"
+        description={`Аккаунт "${account.name}" будет удален. Связанные записи публикаций также будут удалены.`}
+        isPending={deleteMutation.isPending}
+        onConfirm={handleDelete}
+        onCancel={() => setConfirmDelete(false)}
+      />
     </div>
   );
 };

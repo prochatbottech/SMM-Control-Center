@@ -7,6 +7,7 @@ use crate::crm_connectors;
 use crate::crypto;
 use crate::db;
 use crate::logger;
+use crate::worker_status;
 
 pub const AUTOMATION_POLL_INTERVAL: Duration = Duration::from_secs(15);
 /// Invariant: Global Rate Limiter: max 1 action per minute per account
@@ -232,6 +233,7 @@ pub async fn process_due_automation_tasks_with_connector<C: crm_connectors::CrmC
 pub fn start_automation_worker(app: tauri::AppHandle, pool: SqlitePool) {
     tauri::async_runtime::spawn(async move {
         let limiter = Arc::new(AutomationRateLimiter::new());
+        worker_status::automation_set_running();
         logger::emit_log(
             &app,
             "info",
@@ -239,12 +241,15 @@ pub fn start_automation_worker(app: tauri::AppHandle, pool: SqlitePool) {
         );
 
         loop {
-            if let Err(e) = process_due_automation_tasks(Some(&app), &pool, &limiter).await {
-                logger::emit_log(
-                    &app,
-                    "error",
-                    &format!("Ошибка воркера автоматизации воронки: {}", e),
-                );
+            match process_due_automation_tasks(Some(&app), &pool, &limiter).await {
+                Ok(count) => worker_status::automation_record_iteration(count),
+                Err(e) => {
+                    logger::emit_log(
+                        &app,
+                        "error",
+                        &format!("Ошибка воркера автоматизации воронки: {}", e),
+                    );
+                }
             }
             tokio::time::sleep(AUTOMATION_POLL_INTERVAL).await;
         }

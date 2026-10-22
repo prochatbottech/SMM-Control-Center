@@ -24,6 +24,7 @@ import { useApiCredentialsQuery } from '../hooks/useApiCredentials';
 import { generateAiRewrite } from '../api/db';
 import { AISettingsModal } from './AISettingsModal';
 import { MediaPreviewList } from './MediaPreviewList';
+import { MarkdownPreview } from './MarkdownPreview';
 import { toast } from 'sonner';
 
 interface CreatePostFormProps {
@@ -43,6 +44,15 @@ export const CreatePostForm: React.FC<CreatePostFormProps> = ({
   const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>([]);
   const [scheduledAt, setScheduledAt] = useState('');
   const [mediaUrls, setMediaUrls] = useState<string[]>(initialMediaUrls);
+  const [format, setFormat] = useState<'post' | 'article'>('post');
+  const [showPreview, setShowPreview] = useState(false);
+
+  // Telegram regular message limit (characters). Above this we suggest an article.
+  const TG_POST_LIMIT = 4096;
+  const charCount = content.length;
+  const overPostLimit = charCount > TG_POST_LIMIT;
+  const effectiveFormat: 'post' | 'article' =
+    format === 'post' && overPostLimit ? 'article' : format;
 
   // AI Assistant state
   const [showAIPanel, setShowAIPanel] = useState(false);
@@ -238,6 +248,7 @@ export const CreatePostForm: React.FC<CreatePostFormProps> = ({
         status: 'draft',
         scheduled_for: scheduledTimestamp,
         media_urls: mediaUrls,
+        format: effectiveFormat,
       },
       {
         onSuccess: () => {
@@ -288,6 +299,7 @@ export const CreatePostForm: React.FC<CreatePostFormProps> = ({
         status: 'scheduled',
         scheduled_for: scheduledTimestamp,
         media_urls: mediaUrls,
+        format: effectiveFormat,
       },
       {
         onSuccess: () => {
@@ -388,9 +400,35 @@ export const CreatePostForm: React.FC<CreatePostFormProps> = ({
       {/* 2. Post Content & Media */}
       <div className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <label className="text-xs font-semibold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider">
-            Текст публикации
-          </label>
+          <div className="flex items-center gap-3">
+            <label className="text-xs font-semibold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider">
+              Текст публикации
+            </label>
+            <div className="flex items-center p-0.5 bg-zinc-100 dark:bg-zinc-800 rounded-lg border border-zinc-200 dark:border-zinc-700">
+              <button
+                type="button"
+                onClick={() => setFormat('post')}
+                className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-colors ${
+                  effectiveFormat === 'post'
+                    ? 'bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 shadow-xs'
+                    : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200'
+                }`}
+              >
+                Пост
+              </button>
+              <button
+                type="button"
+                onClick={() => setFormat('article')}
+                className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-colors ${
+                  effectiveFormat === 'article'
+                    ? 'bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 shadow-xs'
+                    : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200'
+                }`}
+              >
+                Статья
+              </button>
+            </div>
+          </div>
           <div className="flex flex-wrap items-center gap-2">
             {previousContent !== null && (
               <button
@@ -417,7 +455,28 @@ export const CreatePostForm: React.FC<CreatePostFormProps> = ({
               <span>ИИ Ассистент</span>
             </button>
 
-            <span className="text-xs text-zinc-400 font-mono">{content.length} симв.</span>
+            <span
+              className={`text-xs font-mono ${
+                overPostLimit && format === 'post'
+                  ? 'text-rose-500 font-semibold'
+                  : 'text-zinc-400'
+              }`}
+              title={format === 'post' ? `Лимит поста: ${TG_POST_LIMIT} символов` : 'Режим статьи'}
+            >
+              {charCount}
+              {format === 'post' ? ` / ${TG_POST_LIMIT}` : ''} симв.
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowPreview(!showPreview)}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors cursor-pointer ${
+                showPreview
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300'
+              }`}
+            >
+              {showPreview ? 'Редактор' : 'Превью'}
+            </button>
             <button
               type="button"
               onClick={handleAttachMedia}
@@ -614,14 +673,47 @@ export const CreatePostForm: React.FC<CreatePostFormProps> = ({
           />
         )}
 
-        <textarea
-          rows={5}
-          value={content}
-          onChange={(e) => setContent(e.target.value)}
-          disabled={isPending}
-          placeholder="Напишите текст вашего поста..."
-          className="w-full p-3.5 bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-200 dark:border-zinc-700 rounded-xl text-sm text-zinc-900 dark:text-zinc-100 placeholder-zinc-400 focus:outline-hidden focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-colors disabled:opacity-50 resize-y"
-        />
+        {/* Warning: post exceeds Telegram message limit */}
+        {overPostLimit && format === 'post' && (
+          <div className="flex items-start gap-2 p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-xs text-amber-800 dark:text-amber-300">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+            <span>
+              Превышен лимит поста ({TG_POST_LIMIT} символов — сейчас {charCount}). Для Telegram
+              публикация будет отправлена <strong>как статья</strong> (rich-сообщение) с
+              Markdown-форматированием.
+            </span>
+          </div>
+        )}
+
+        {/* Editor / Markdown preview */}
+        {showPreview ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <textarea
+              rows={12}
+              value={content}
+              onChange={(e) => setContent(e.target.value)}
+              disabled={isPending}
+              placeholder="Markdown: # заголовок, **жирный**, *курсив*, - список, > цитата, `код`…"
+              className="w-full p-3.5 bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-200 dark:border-zinc-700 rounded-xl text-sm text-zinc-900 dark:text-zinc-100 placeholder-zinc-400 focus:outline-hidden focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-colors disabled:opacity-50 resize-y font-mono"
+            />
+            <div className="w-full p-3.5 min-h-[16rem] max-h-[24rem] overflow-y-auto bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-xl">
+              <MarkdownPreview content={content} />
+            </div>
+          </div>
+        ) : (
+          <textarea
+            rows={5}
+            value={content}
+            onChange={(e) => setContent(e.target.value)}
+            disabled={isPending}
+            placeholder={
+              effectiveFormat === 'article'
+                ? 'Текст статьи в Markdown: # заголовок, списки, цитаты, ссылки…'
+                : 'Напишите текст вашего поста...'
+            }
+            className="w-full p-3.5 bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-200 dark:border-zinc-700 rounded-xl text-sm text-zinc-900 dark:text-zinc-100 placeholder-zinc-400 focus:outline-hidden focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-colors disabled:opacity-50 resize-y"
+          />
+        )}
       </div>
 
       {/* 3. Schedule Time (datetime-local + quick presets) */}

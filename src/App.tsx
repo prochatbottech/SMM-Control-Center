@@ -14,6 +14,7 @@ import { AutostartToggle } from './components/AutostartToggle';
 import { AISettingsModal } from './components/AISettingsModal';
 import { LogTerminal } from './components/LogTerminal';
 import { useSystemLogs } from './hooks/useSystemLogs';
+import { useWorkerStatusQuery } from './hooks/useWorkerStatus';
 
 type ActiveTab = 'posts' | 'grabber' | 'accounts' | 'crm' | 'analytics' | 'settings';
 
@@ -22,6 +23,7 @@ export function App() {
   const [showAISettings, setShowAISettings] = useState(false);
   const [isTerminalOpen, setIsTerminalOpen] = useState(false);
   const { logs, clearLogs, errorCount, warnCount } = useSystemLogs();
+  const { data: workerStatus } = useWorkerStatusQuery();
   const {
     isChecking,
     isDownloading,
@@ -193,12 +195,31 @@ export function App() {
             </button>
 
             {/* Tokio Worker Indicator */}
-            <div className="hidden sm:flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400 font-medium">
+            <div
+              className="hidden sm:flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400 font-medium"
+              title={
+                workerStatus
+                  ? `Scheduler: ${workerStatus.scheduler.processed_count} обработано, интервал ${workerStatus.scheduler.interval_secs}s\nAutomation: ${workerStatus.automation.processed_count} обработано, интервал ${workerStatus.automation.interval_secs}s`
+                  : 'Статус воркеров...'
+              }
+            >
               <span className="relative flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                {workerStatus?.scheduler.running && workerStatus?.automation.running ? (
+                  <>
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                  </>
+                ) : (
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
+                )}
               </span>
-              <span>Worker Active</span>
+              <span>
+                {workerStatus
+                  ? workerStatus.scheduler.running && workerStatus.automation.running
+                    ? 'Worker Active'
+                    : 'Worker Starting...'
+                  : 'Worker...'}
+              </span>
             </div>
           </div>
         </div>

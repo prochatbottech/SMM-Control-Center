@@ -19,6 +19,7 @@ import { Post, PostStatus } from '../api/db';
 import { useAccountsQuery } from '../hooks/useAccounts';
 import { useDeletePostMutation, useRetryPostMutation } from '../hooks/usePosts';
 import { MediaPreviewList } from './MediaPreviewList';
+import { ConfirmDialog } from './ConfirmDialog';
 import { toast } from 'sonner';
 
 interface PostCardProps {
@@ -30,6 +31,7 @@ export const PostCard: React.FC<PostCardProps> = ({ post }) => {
   const deleteMutation = useDeletePostMutation();
   const retryMutation = useRetryPostMutation();
   const [activeErrorId, setActiveErrorId] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const canRetry = post.status === 'failed' || post.status === 'partially_published';
 
@@ -46,17 +48,16 @@ export const PostCard: React.FC<PostCardProps> = ({ post }) => {
   };
 
   const handleDelete = () => {
-    if (confirm('Вы уверены, что хотите удалить этот пост?')) {
-      deleteMutation.mutate(post.id, {
-        onSuccess: () => {
-          toast.success('Пост успешно удален');
-        },
-        onError: (err: any) => {
-          const msg = typeof err === 'string' ? err : err?.message || String(err);
-          toast.error(`Ошибка при удалении: ${msg}`);
-        },
-      });
-    }
+    deleteMutation.mutate(post.id, {
+      onSuccess: () => {
+        toast.success('Пост успешно удален');
+        setConfirmDelete(false);
+      },
+      onError: (err: any) => {
+        const msg = typeof err === 'string' ? err : err?.message || String(err);
+        toast.error(`Ошибка при удалении: ${msg}`);
+      },
+    });
   };
 
   // Helper for status badge
@@ -148,7 +149,14 @@ export const PostCard: React.FC<PostCardProps> = ({ post }) => {
       <div>
         {/* Top: Status & Actions */}
         <div className="flex items-center justify-between mb-3">
-          {getStatusBadge(post.status)}
+          <div className="flex items-center gap-2 flex-wrap">
+            {getStatusBadge(post.status)}
+            {post.format === 'article' && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20">
+                Статья
+              </span>
+            )}
+          </div>
 
           <div className="flex items-center gap-1.5">
             {canRetry && (
@@ -164,7 +172,7 @@ export const PostCard: React.FC<PostCardProps> = ({ post }) => {
             )}
 
             <button
-              onClick={handleDelete}
+              onClick={() => setConfirmDelete(true)}
               disabled={deleteMutation.isPending}
               title="Удалить пост"
               className="p-1.5 text-zinc-400 hover:text-rose-500 hover:bg-rose-500/10 rounded-lg transition-colors disabled:opacity-50"
@@ -290,6 +298,15 @@ export const PostCard: React.FC<PostCardProps> = ({ post }) => {
           ID: {post.id.slice(0, 8)}
         </span>
       </div>
+
+      <ConfirmDialog
+        open={confirmDelete}
+        title="Удалить пост?"
+        description="Пост будет удален безвозвратно вместе с историей отправки."
+        isPending={deleteMutation.isPending}
+        onConfirm={handleDelete}
+        onCancel={() => setConfirmDelete(false)}
+      />
     </div>
   );
 };

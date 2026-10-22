@@ -68,6 +68,7 @@ export interface Post {
   status: PostStatus;
   scheduled_for: number | null; // Unix timestamp in seconds, null for drafts
   created_at: number; // Unix timestamp in seconds
+  format: 'post' | 'article'; // Delivery format: regular post or Telegram rich article
   destination_account_ids: string[];
   destinations?: DestinationInfo[];
 }
@@ -82,6 +83,7 @@ export interface CreatePostInput {
   status?: PostStatus;
   scheduled_for?: number | null;
   created_at?: number;
+  format?: 'post' | 'article';
   destination_account_ids?: string[];
   account_ids?: string[]; // Alias for destination_account_ids
 }
@@ -205,6 +207,7 @@ export async function createPost(input: CreatePostInput): Promise<Post> {
     status: input.status,
     scheduled_for: input.scheduled_for,
     created_at: input.created_at,
+    format: input.format ?? 'post',
     destination_account_ids: destIds,
   };
   return await safeInvoke<Post>('create_post', { input: payload });
@@ -541,6 +544,26 @@ export async function exportDatabase(destinationPath: string): Promise<void> {
 
 export async function importDatabase(sourcePath: string): Promise<void> {
   return await safeInvoke<void>('import_database', { sourcePath });
+}
+
+// ============================================================================
+// Worker Status API
+// ============================================================================
+
+export interface WorkerInfo {
+  running: boolean;
+  last_run_at: number | null;
+  processed_count: number;
+  interval_secs: number;
+}
+
+export interface WorkerStatus {
+  scheduler: WorkerInfo;
+  automation: WorkerInfo;
+}
+
+export async function getWorkerStatus(): Promise<WorkerStatus> {
+  return await safeInvoke<WorkerStatus>('get_worker_status');
 }
 
 

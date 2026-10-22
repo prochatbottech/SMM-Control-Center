@@ -32,6 +32,7 @@ import {
 import { useAccountsQuery } from '../hooks/useAccounts';
 import { useApiCredentialsQuery } from '../hooks/useApiCredentials';
 import { Lead, Platform, ActionType, FunnelStage } from '../api/db';
+import { ConfirmDialog } from './ConfirmDialog';
 import { toast } from 'sonner';
 
 const FUNNEL_COLUMNS: { id: FunnelStage; title: string; color: string; badge: string }[] = [
@@ -66,6 +67,7 @@ export const CRMView: React.FC = () => {
   const [showAIFunnelModal, setShowAIFunnelModal] = useState(false);
   const [selectedLeadForAction, setSelectedLeadForAction] = useState<Lead | null>(null);
   const [selectedLeadForAI, setSelectedLeadForAI] = useState<Lead | null>(null);
+  const [deletingLead, setDeletingLead] = useState<{ id: string; name: string } | null>(null);
 
   // AI Funnel form state
   const [aiFramework, setAiFramework] = useState<'aida' | 'spin'>('aida');
@@ -306,13 +308,12 @@ export const CRMView: React.FC = () => {
   };
 
   const handleDeleteLead = (id: string, name: string) => {
-    if (confirm(`Удалить контакт "${name}" и связанные задачи?`)) {
-      deleteLeadMutation.mutate(id, {
-        onSuccess: () => {
-          toast.success(`Лид "${name}" удален`);
-        },
-      });
-    }
+    deleteLeadMutation.mutate(id, {
+      onSuccess: () => {
+        toast.success(`Лид "${name}" удален`);
+        setDeletingLead(null);
+      },
+    });
   };
 
   const handleMarkDeadLeads = () => {
@@ -472,7 +473,7 @@ export const CRMView: React.FC = () => {
 
                           <button
                             type="button"
-                            onClick={() => handleDeleteLead(lead.id, lead.name)}
+                            onClick={() => setDeletingLead({ id: lead.id, name: lead.name })}
                             className="p-1 text-zinc-400 hover:text-rose-500 rounded-md transition-colors"
                             title="Удалить лида"
                           >
@@ -1252,6 +1253,15 @@ export const CRMView: React.FC = () => {
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        open={deletingLead !== null}
+        title="Удалить контакт?"
+        description={`Контакт "${deletingLead?.name}" и связанные задачи будут удалены безвозвратно.`}
+        isPending={deleteLeadMutation.isPending}
+        onConfirm={() => deletingLead && handleDeleteLead(deletingLead.id, deletingLead.name)}
+        onCancel={() => setDeletingLead(null)}
+      />
     </div>
   );
 };

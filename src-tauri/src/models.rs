@@ -158,6 +158,9 @@ pub struct PostRow {
     pub status: String,
     pub scheduled_for: Option<i64>,
     pub created_at: i64,
+    /// Delivery format: 'post' (regular message) or 'article' (rich message)
+    #[sqlx(default)]
+    pub format: String,
 }
 
 /// Detailed destination account info including status and error log
@@ -177,9 +180,16 @@ pub struct Post {
     pub status: String,
     pub scheduled_for: Option<i64>,
     pub created_at: i64,
+    /// Delivery format: 'post' (regular) or 'article' (Telegram rich message)
+    #[serde(default = "default_post_format")]
+    pub format: String,
     pub destination_account_ids: Vec<String>,
     #[serde(default)]
     pub destinations: Vec<DestinationInfo>,
+}
+
+fn default_post_format() -> String {
+    "post".to_string()
 }
 
 /// Payload for creating a new post
@@ -191,6 +201,7 @@ pub struct CreatePostInput {
     pub status: Option<String>,
     pub scheduled_for: Option<i64>,
     pub created_at: Option<i64>,
+    pub format: Option<String>,
     pub destination_account_ids: Option<Vec<String>>,
 }
 
@@ -207,6 +218,8 @@ impl<'de> Deserialize<'de> for CreatePostInput {
             status: Option<String>,
             scheduled_for: Option<i64>,
             created_at: Option<i64>,
+            #[serde(default)]
+            format: Option<String>,
             #[serde(default)]
             account_ids: Option<Vec<String>>,
             #[serde(default)]
@@ -226,6 +239,7 @@ impl<'de> Deserialize<'de> for CreatePostInput {
             status: raw.status,
             scheduled_for: raw.scheduled_for,
             created_at: raw.created_at,
+            format: raw.format,
             destination_account_ids: dest_ids,
         })
     }

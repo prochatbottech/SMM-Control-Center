@@ -5,6 +5,7 @@ use crate::crypto;
 use crate::db;
 use crate::logger;
 use crate::publisher::{PostPublisher, RealPublisher};
+use crate::worker_status;
 
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -151,6 +152,7 @@ pub async fn process_due_posts<P: PostPublisher>(
                     &plain_token,
                     &post.content,
                     &post.media_urls,
+                    &post.format,
                 )
                 .await;
 
@@ -244,6 +246,7 @@ pub async fn process_due_posts<P: PostPublisher>(
 pub fn start_worker(app: tauri::AppHandle, pool: SqlitePool) {
     tauri::async_runtime::spawn(async move {
         let publisher = RealPublisher::new();
+        worker_status::scheduler_set_running();
         logger::emit_log(
             &app,
             "info",
@@ -254,12 +257,15 @@ pub fn start_worker(app: tauri::AppHandle, pool: SqlitePool) {
         );
 
         loop {
-            if let Err(e) = process_due_posts(Some(&app), &pool, &publisher, None).await {
-                logger::emit_log(
-                    &app,
-                    "error",
-                    &format!("Ошибка цикла планировщика: {}", e),
-                );
+            match process_due_posts(Some(&app), &pool, &publisher, None).await {
+                Ok(count) => worker_status::scheduler_record_iteration(count),
+                Err(e) => {
+                    logger::emit_log(
+                        &app,
+                        "error",
+                        &format!("Ошибка цикла планировщика: {}", e),
+                    );
+                }
             }
             tokio::time::sleep(DEFAULT_POLL_INTERVAL).await;
         }

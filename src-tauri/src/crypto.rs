@@ -108,8 +108,32 @@ fn get_or_generate_key_file_fallback() -> Result<[u8; KEY_LEN], CryptoError> {
     let b64_new_key = BASE64_STANDARD.encode(new_key);
     std::fs::write(&key_path, b64_new_key)
         .map_err(|e| CryptoError::KeyringUnavailable(format!("Failed to write fallback key file: {}", e)))?;
+    restrict_key_file_permissions(&key_path);
 
     Ok(new_key)
+}
+
+/// Restrict the fallback master key file so only the current user can read it.
+/// On Unix this means 0600; on Windows the file lives in the per-user %APPDATA%
+/// directory which already restricts access to the owning user.
+fn restrict_key_file_permissions(key_path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(dir) = key_path.parent() {
+            if let Ok(meta) = std::fs::metadata(dir) {
+                let mut perms = meta.permissions();
+                perms.set_mode(0o700);
+                let _ = std::fs::set_permissions(dir, perms);
+            }
+        }
+        let _ = std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(windows)]
+    {
+        // %APPDATA% is per-user by default; no additional ACL restriction required.
+        let _ = key_path;
+    }
 }
 
 fn fallback_key_path() -> std::path::PathBuf {
@@ -253,6 +277,26 @@ mod tests {
         wrong_key[0] = key[0] ^ 0xFF; // flip bits
         let err4 = decrypt_token(&enc, &wrong_key);
         assert!(matches!(err4, Err(CryptoError::DecryptionFailed(_))));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_fallback_key_file_has_restricted_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let key_path = dir.path().join(".master_key");
+        let key = [7u8; KEY_LEN];
+        std::fs::write(&key_path, BASE64_STANDARD.encode(key))
+            .expect("Failed to write key file");
+
+        restrict_key_file_permissions(&key_path);
+
+        let mode = std::fs::metadata(&key_path)
+            .expect("Failed to read metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "Fallback key file must be 0600");
     }
 
     #[test]

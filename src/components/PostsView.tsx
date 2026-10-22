@@ -26,7 +26,7 @@ export const PostsView: React.FC = () => {
             </span>
             <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20">
               <Clock className="w-3 h-3" />
-              Tokio Worker (30s Polling)
+              Tokio Worker (Scheduler 30s / Automation 15s)
             </span>
           </div>
           <h1 className="text-2xl md:text-3xl font-bold tracking-tight text-zinc-900 dark:text-zinc-50">

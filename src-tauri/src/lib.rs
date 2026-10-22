@@ -13,6 +13,7 @@ pub mod models;
 pub mod parser;
 pub mod publisher;
 pub mod scheduler;
+pub mod worker_status;
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -45,6 +46,12 @@ pub fn run() {
             version: 4,
             description: "create_crm_and_funnels_tables",
             sql: db::MIGRATION_04_SQL,
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 5,
+            description: "add_post_format",
+            sql: db::MIGRATION_05_SQL,
             kind: MigrationKind::Up,
         },
     ];
@@ -178,7 +185,8 @@ pub fn run() {
             crm::generate_and_schedule_message,
             analytics::get_funnel_analytics,
             backup::export_database,
-            backup::import_database
+            backup::import_database,
+            worker_status::get_worker_status
         ]);
 
     #[allow(unused_mut)]
@@ -263,6 +271,7 @@ mod tests {
             status: Some("draft".to_string()),
             scheduled_for: None,
             created_at: None,
+            format: None,
             destination_account_ids: Some(vec![created_acc.id.clone()]),
         };
         let created_post = db::create_post(&pool, post_input)
@@ -316,6 +325,7 @@ mod tests {
             status: Some("draft".to_string()),
             scheduled_for: None,
             created_at: None,
+            format: None,
             destination_account_ids: Some(vec![fake_account_id]),
         };
 
@@ -429,6 +439,7 @@ mod tests {
             status: Some("scheduled".to_string()),
             scheduled_for: Some(five_minutes_ago),
             created_at: Some(five_minutes_ago - 120),
+            format: None,
             destination_account_ids: Some(vec![created_acc.id.clone()]),
         };
         let created_post = db::create_post(&pool, post_input).await.expect("Failed to create post");
@@ -485,6 +496,7 @@ mod tests {
                 status: Some("scheduled".to_string()),
                 scheduled_for: Some(five_minutes_ago),
                 created_at: None,
+                format: None,
                 destination_account_ids: Some(vec![acc.id]),
             },
         )
@@ -516,6 +528,7 @@ mod tests {
                 token: &str,
                 _content: &str,
                 _media_urls: &[String],
+                _format: &str,
             ) -> Result<String, String> {
                 let mut counts = self.call_counts.lock().unwrap();
                 *counts.entry(account_name.to_string()).or_insert(0) += 1;
@@ -576,6 +589,7 @@ mod tests {
                 status: Some("scheduled".to_string()),
                 scheduled_for: Some(due_time),
                 created_at: None,
+                format: None,
                 destination_account_ids: Some(vec![acc_a.id.clone(), acc_b.id.clone()]),
             },
         )
@@ -650,6 +664,7 @@ mod tests {
             status: Some("draft".to_string()),
             scheduled_for: None,
             created_at: None,
+            format: None,
             destination_account_ids: None,
         };
         let created_draft = db::create_post(&pool, draft_input).await.expect("Draft creation should succeed");
@@ -665,6 +680,7 @@ mod tests {
             status: Some("scheduled".to_string()),
             scheduled_for: Some(chrono::Utc::now().timestamp() + 3600),
             created_at: None,
+            format: None,
             destination_account_ids: None,
         };
         let res = db::create_post(&pool, invalid_scheduled).await;

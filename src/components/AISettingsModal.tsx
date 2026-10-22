@@ -18,6 +18,7 @@ import {
   useDeleteApiCredentialMutation,
 } from '../hooks/useApiCredentials';
 import { ApiCredentialProvider } from '../api/db';
+import { ConfirmDialog } from './ConfirmDialog';
 import { toast } from 'sonner';
 
 interface AISettingsModalProps {
@@ -80,6 +81,7 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
   const [apiKey, setApiKey] = useState('');
   const [showKey, setShowKey] = useState(false);
   const [isAdding, setIsAdding] = useState(false);
+  const [deletingCredential, setDeletingCredential] = useState<{ id: string; name: string } | null>(null);
 
   if (!isOpen) return null;
 
@@ -143,16 +145,15 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
   };
 
   const handleDelete = (id: string, credName: string) => {
-    if (confirm(`Удалить ключ "${credName}"?`)) {
-      deleteMutation.mutate(id, {
-        onSuccess: () => {
-          toast.success(`Ключ "${credName}" удален`);
-        },
-        onError: (err) => {
-          toast.error(`Ошибка при удалении: ${err.message}`);
-        },
-      });
-    }
+    deleteMutation.mutate(id, {
+      onSuccess: () => {
+        toast.success(`Ключ "${credName}" удален`);
+        setDeletingCredential(null);
+      },
+      onError: (err) => {
+        toast.error(`Ошибка при удалении: ${err.message}`);
+      },
+    });
   };
 
   return (
@@ -258,7 +259,7 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
                       </div>
                     </div>
                     <button
-                      onClick={() => handleDelete(cred.id, cred.name)}
+                      onClick={() => setDeletingCredential({ id: cred.id, name: cred.name })}
                       disabled={deleteMutation.isPending}
                       className="p-1.5 text-zinc-400 hover:text-red-600 dark:hover:text-red-400 rounded-lg hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors shrink-0 ml-2"
                       title="Удалить ключ"
@@ -452,6 +453,15 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
           </button>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={deletingCredential !== null}
+        title="Удалить ключ?"
+        description={`Ключ "${deletingCredential?.name}" будет удален.`}
+        isPending={deleteMutation.isPending}
+        onConfirm={() => deletingCredential && handleDelete(deletingCredential.id, deletingCredential.name)}
+        onCancel={() => setDeletingCredential(null)}
+      />
     </div>
   );
 };

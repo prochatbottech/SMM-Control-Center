@@ -15,6 +15,7 @@ pub const MIGRATION_01_SQL: &str = include_str!("../migrations/01_initial.sql");
 pub const MIGRATION_02_SQL: &str = include_str!("../migrations/02_add_destinations_status.sql");
 pub const MIGRATION_03_SQL: &str = include_str!("../migrations/03_api_credentials.sql");
 pub const MIGRATION_04_SQL: &str = include_str!("../migrations/04_crm_and_funnels.sql");
+pub const MIGRATION_05_SQL: &str = include_str!("../migrations/05_post_format.sql");
 pub const INITIAL_MIGRATION_SQL: &str = MIGRATION_01_SQL;
 
 /// Holds the SQLite connection pool as Tauri managed state
@@ -158,6 +159,27 @@ pub async fn apply_migrations(pool: &SqlitePool) -> Result<(), String> {
             .map_err(|e| format!("Failed to record migration 04: {}", e))?;
     }
 
+    // Migration 05 (Post format: post | article)
+    if !applied_versions.contains(&5) {
+        let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('posts')")
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+
+        if !columns.contains(&"format".to_string()) {
+            sqlx::query("ALTER TABLE posts ADD COLUMN format TEXT NOT NULL DEFAULT 'post'")
+                .execute(pool)
+                .await
+                .map_err(|e| format!("Failed to add format to posts: {}", e))?;
+        }
+
+        sqlx::query("INSERT INTO _schema_migrations (version, applied_at) VALUES (5, ?)")
+            .bind(chrono::Utc::now().timestamp())
+            .execute(pool)
+            .await
+            .map_err(|e| format!("Failed to record migration 05: {}", e))?;
+    }
+
     Ok(())
 }
 
@@ -286,6 +308,10 @@ pub async fn create_post(pool: &SqlitePool, input: CreatePostInput) -> Result<Po
     let created_at = input.created_at.unwrap_or_else(|| chrono::Utc::now().timestamp());
     let scheduled_for = input.scheduled_for;
     let destination_ids = input.destination_account_ids.unwrap_or_default();
+    let format = match input.format.as_deref() {
+        Some("article") => "article".to_string(),
+        _ => "post".to_string(),
+    };
 
     // Use a transaction to ensure post and destinations are saved together
     let mut tx = pool
@@ -295,8 +321,8 @@ pub async fn create_post(pool: &SqlitePool, input: CreatePostInput) -> Result<Po
 
     sqlx::query(
         r#"
-        INSERT INTO posts (id, content, media_urls, status, scheduled_for, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO posts (id, content, media_urls, status, scheduled_for, created_at, format)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&id)
@@ -305,6 +331,7 @@ pub async fn create_post(pool: &SqlitePool, input: CreatePostInput) -> Result<Po
     .bind(&status_str)
     .bind(scheduled_for)
     .bind(created_at)
+    .bind(&format)
     .execute(&mut *tx)
     .await
     .map_err(|e| format!("Failed to insert post: {}", e))?;
@@ -345,6 +372,7 @@ pub async fn create_post(pool: &SqlitePool, input: CreatePostInput) -> Result<Po
         status: status_str,
         scheduled_for,
         created_at,
+        format,
         destination_account_ids: destination_ids,
         destinations,
     })
@@ -353,7 +381,7 @@ pub async fn create_post(pool: &SqlitePool, input: CreatePostInput) -> Result<Po
 pub async fn get_posts(pool: &SqlitePool) -> Result<Vec<Post>, String> {
     let rows = sqlx::query_as::<_, PostRow>(
         r#"
-        SELECT id, content, media_urls, status, scheduled_for, created_at
+        SELECT id, content, media_urls, status, scheduled_for, created_at, format
         FROM posts
         ORDER BY created_at DESC
         "#,
@@ -400,6 +428,7 @@ pub async fn get_posts(pool: &SqlitePool) -> Result<Vec<Post>, String> {
             status: row.status,
             scheduled_for: row.scheduled_for,
             created_at: row.created_at,
+            format: row.format,
             destination_account_ids,
             destinations,
         });
@@ -422,7 +451,7 @@ pub async fn delete_post(pool: &SqlitePool, id: &str) -> Result<bool, String> {
 pub async fn get_due_posts(pool: &SqlitePool, current_timestamp: i64) -> Result<Vec<Post>, String> {
     let rows = sqlx::query_as::<_, PostRow>(
         r#"
-        SELECT id, content, media_urls, status, scheduled_for, created_at
+        SELECT id, content, media_urls, status, scheduled_for, created_at, format
         FROM posts
         WHERE status = 'scheduled' AND scheduled_for <= ?
         ORDER BY scheduled_for ASC
@@ -471,6 +500,7 @@ pub async fn get_due_posts(pool: &SqlitePool, current_timestamp: i64) -> Result<
             status: row.status,
             scheduled_for: row.scheduled_for,
             created_at: row.created_at,
+            format: row.format,
             destination_account_ids,
             destinations,
         });
@@ -577,7 +607,7 @@ pub async fn get_post_destinations(
 pub async fn get_post_by_id(pool: &SqlitePool, post_id: &str) -> Result<Option<Post>, String> {
     let maybe_row = sqlx::query_as::<_, PostRow>(
         r#"
-        SELECT id, content, media_urls, status, scheduled_for, created_at
+        SELECT id, content, media_urls, status, scheduled_for, created_at, format
         FROM posts
         WHERE id = ?
         "#,
@@ -603,6 +633,7 @@ pub async fn get_post_by_id(pool: &SqlitePool, post_id: &str) -> Result<Option<P
                 status: row.status,
                 scheduled_for: row.scheduled_for,
                 created_at: row.created_at,
+                format: row.format,
                 destination_account_ids,
                 destinations,
             }))

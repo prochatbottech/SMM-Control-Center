@@ -15,6 +15,12 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
   const [token, setToken] = useState('');
   const [showToken, setShowToken] = useState(false);
 
+  // OK (Одноклассники) requires a set of REST API credentials.
+  const [okAccessToken, setOkAccessToken] = useState('');
+  const [okAppKey, setOkAppKey] = useState('');
+  const [okSessionSecret, setOkSessionSecret] = useState('');
+  const [okGid, setOkGid] = useState('');
+
   const createMutation = useCreateAccountMutation();
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -25,7 +31,19 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
       return;
     }
 
-    if (!token.trim()) {
+    let tokenValue = token.trim();
+    if (platform === 'ok') {
+      if (!okAccessToken.trim() || !okAppKey.trim() || !okSessionSecret.trim()) {
+        toast.error('Для OK заполните Access Token, Application Key и Session Secret Key');
+        return;
+      }
+      tokenValue = JSON.stringify({
+        access_token: okAccessToken.trim(),
+        application_key: okAppKey.trim(),
+        session_secret_key: okSessionSecret.trim(),
+        gid: okGid.trim(),
+      });
+    } else if (!tokenValue) {
       toast.error('Пожалуйста, введите токен доступа');
       return;
     }
@@ -34,13 +52,17 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
       {
         platform,
         name: name.trim(),
-        token: token.trim(),
+        token: tokenValue,
       },
       {
         onSuccess: (createdAccount) => {
           toast.success(`Аккаунт "${createdAccount.name}" успешно подключен!`);
           // Invariant: UI Security: Clear raw token and inputs immediately on success
           setToken('');
+          setOkAccessToken('');
+          setOkAppKey('');
+          setOkSessionSecret('');
+          setOkGid('');
           setName('');
           setPlatform('vk');
           onSuccess?.();
@@ -100,35 +122,63 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
         )}
       </div>
 
-      {/* Access Token (Password Input) */}
-      <div>
-        <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider mb-1.5">
-          OAuth-токен доступа
-        </label>
-        <div className="relative">
-          <input
-            type={showToken ? 'text' : 'password'}
-            value={token}
-            onChange={(e) => setToken(e.target.value)}
-            disabled={isPending}
-            placeholder="Вставьте токен доступа"
-            className="w-full pl-3.5 pr-10 py-2.5 bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-200 dark:border-zinc-700 rounded-lg text-sm text-zinc-900 dark:text-zinc-100 placeholder-zinc-400 focus:outline-hidden focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-colors disabled:opacity-50 font-mono text-xs"
-          />
-          <button
-            type="button"
-            onClick={() => setShowToken(!showToken)}
-            disabled={isPending}
-            tabIndex={-1}
-            className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 transition-colors"
-          >
-            {showToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-          </button>
+      {platform === 'ok' ? (
+        <div className="space-y-3">
+          <p className="text-xs text-amber-700 dark:text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-lg p-2.5">
+            Для Одноклассников укажите данные REST API приложения и сессии. Все значения будут зашифрованы AES-256.
+          </p>
+          {[
+            { label: 'Access Token', value: okAccessToken, onChange: setOkAccessToken, placeholder: 'Токен доступа сессии' },
+            { label: 'Application Key', value: okAppKey, onChange: setOkAppKey, placeholder: 'Публичный ключ приложения' },
+            { label: 'Session Secret Key', value: okSessionSecret, onChange: setOkSessionSecret, placeholder: 'Секретный ключ сессии' },
+            { label: 'Group ID (gid)', value: okGid, onChange: setOkGid, placeholder: 'ID группы OK (опционально)' },
+          ].map((field) => (
+            <div key={field.label}>
+              <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider mb-1.5">
+                {field.label}
+              </label>
+              <input
+                type="password"
+                value={field.value}
+                onChange={(e) => field.onChange(e.target.value)}
+                disabled={isPending}
+                placeholder={field.placeholder}
+                className="w-full px-3.5 py-2.5 bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-200 dark:border-zinc-700 rounded-lg text-sm text-zinc-900 dark:text-zinc-100 placeholder-zinc-400 focus:outline-hidden focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-colors disabled:opacity-50 font-mono text-xs"
+              />
+            </div>
+          ))}
         </div>
-        <p className="flex items-center gap-1.5 mt-1.5 text-xs text-zinc-500 dark:text-zinc-400">
-          <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
-          Токен шифруется ключом AES-256 в OS Keyring и не сохраняется в открытом виде.
-        </p>
-      </div>
+      ) : (
+        /* Access Token (Password Input) */
+        <div>
+          <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider mb-1.5">
+            OAuth-токен доступа
+          </label>
+          <div className="relative">
+            <input
+              type={showToken ? 'text' : 'password'}
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              disabled={isPending}
+              placeholder="Вставьте токен доступа"
+              className="w-full pl-3.5 pr-10 py-2.5 bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-200 dark:border-zinc-700 rounded-lg text-sm text-zinc-900 dark:text-zinc-100 placeholder-zinc-400 focus:outline-hidden focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-colors disabled:opacity-50 font-mono text-xs"
+            />
+            <button
+              type="button"
+              onClick={() => setShowToken(!showToken)}
+              disabled={isPending}
+              tabIndex={-1}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 transition-colors"
+            >
+              {showToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+            </button>
+          </div>
+          <p className="flex items-center gap-1.5 mt-1.5 text-xs text-zinc-500 dark:text-zinc-400">
+            <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
+            Токен шифруется ключом AES-256 в OS Keyring и не сохраняется в открытом виде.
+          </p>
+        </div>
+      )}
 
       {/* Actions */}
       <div className="flex items-center justify-end gap-3 pt-3 border-t border-zinc-100 dark:border-zinc-800">
@@ -144,7 +194,13 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
         )}
         <button
           type="submit"
-          disabled={isPending || !name.trim() || !token.trim()}
+          disabled={
+            isPending ||
+            !name.trim() ||
+            (platform === 'ok'
+              ? !okAccessToken.trim() || !okAppKey.trim() || !okSessionSecret.trim()
+              : !token.trim())
+          }
           className="inline-flex items-center gap-2 px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors shadow-xs disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {isPending && <Loader2 className="w-4 h-4 animate-spin" />}
