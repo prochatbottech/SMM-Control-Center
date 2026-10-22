@@ -17,10 +17,10 @@ jobs:
         include:
           - platform: 'windows-latest'
             target: 'x86_64-pc-windows-msvc'
-            args: '--config "{\"bundle\":{\"createUpdaterArtifacts\":true}}"'
+            args: ''
           - platform: 'ubuntu-22.04'
             target: 'x86_64-unknown-linux-gnu'
-            args: '--config "{\"bundle\":{\"createUpdaterArtifacts\":true}}"'
+            args: ''
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -57,6 +57,9 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: 'src-tauri'
+
+      - name: Enable updater artifacts for release
+        run: node -e "const fs = require('fs'); const p = 'src-tauri/tauri.conf.json'; const c = JSON.parse(fs.readFileSync(p, 'utf8')); c.bundle.createUpdaterArtifacts = true; fs.writeFileSync(p, JSON.stringify(c, null, 2));"
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v1
