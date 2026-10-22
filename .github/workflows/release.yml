@@ -70,7 +70,17 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: 'SMM Control Center v__VERSION__'
-          releaseBody: 'Release v__VERSION__ of SMM Control Center. See assets below for installers and auto-update binaries.'
+          releaseBody: |
+            ### Обновления
+            - Автообновление теперь: скачивание → установка → перезапуск → подтверждение успеха с показом списка изменений
+            - Версия в шапке читается из установленного бинарника и корректно меняется после апдейта
+
+            ### Возможности
+            - Telegram: длинные посты публикуются как статьи (Rich Messages, Bot API 10.1); переключатель «Пост / Статья», Markdown-редактор с превью
+            - Медиавложения: VK (wall photo) и Telegram (sendPhoto / sendMediaGroup)
+            - Платформа OK (Одноклассники): публикация через mediatopic.post
+            - Живой индикатор состояния фоновых воркеров
+            - Модальные подтверждения удаления вместо нативных диалогов
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}

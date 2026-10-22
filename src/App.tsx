@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { getVersion } from '@tauri-apps/api/app';
 import packageJson from '../package.json';
 import { AccountsView } from './components/AccountsView';
 import { PostsView } from './components/PostsView';
@@ -22,6 +23,13 @@ export function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('posts');
   const [showAISettings, setShowAISettings] = useState(false);
   const [isTerminalOpen, setIsTerminalOpen] = useState(false);
+  const [appVersion, setAppVersion] = useState<string>(packageJson.version);
+  useEffect(() => {
+    // Read the real installed version at runtime so the badge reflects in-place updates.
+    getVersion()
+      .then(setAppVersion)
+      .catch(() => {});
+  }, []);
   const { logs, clearLogs, errorCount, warnCount } = useSystemLogs();
   const { data: workerStatus } = useWorkerStatusQuery();
   const {
@@ -51,7 +59,7 @@ export function App() {
               <div className="font-bold text-base tracking-tight text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
                 SMM Control Center
                 <span className="text-[10px] uppercase font-semibold tracking-wider px-1.5 py-0.5 rounded-sm bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">
-                  v{packageJson.version}
+                  v{appVersion}
                 </span>
               </div>
             </div>
