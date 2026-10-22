@@ -34,6 +34,16 @@ const PROVIDER_PRESETS: Record<
     provider: 'openai_compat',
     baseUrl: 'https://api.openai.com/v1',
   },
+  taynik: {
+    name: 'Тайник (Taynik)',
+    provider: 'openai_compat',
+    baseUrl: 'https://taynik.store/v1',
+  },
+  proxyapi: {
+    name: 'ProxyAPI',
+    provider: 'openai_compat',
+    baseUrl: 'https://api.proxyapi.ru/openai/v1',
+  },
   openrouter: {
     name: 'OpenRouter',
     provider: 'openai_compat',
@@ -108,12 +118,15 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
       return;
     }
 
+    const cleanKey = apiKey.trim().replace(/^Bearer\s+/i, '');
+    const cleanBaseUrl = baseUrl.trim().replace(/\/+$/, '');
+
     createMutation.mutate(
       {
         provider,
         name: name.trim(),
-        base_url: baseUrl.trim(),
-        api_key: apiKey.trim(),
+        base_url: cleanBaseUrl,
+        api_key: cleanKey,
       },
       {
         onSuccess: () => {

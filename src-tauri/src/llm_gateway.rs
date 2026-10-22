@@ -14,6 +14,38 @@ pub fn sanitize_error(err_msg: &str, raw_key: &str) -> String {
     }
 }
 
+/// Helper to clean raw API keys (trims whitespace and strips any accidental "Bearer " prefix)
+pub fn clean_api_key(key: &str) -> &str {
+    let trimmed = key.trim();
+    if let Some(stripped) = trimmed.strip_prefix("Bearer ") {
+        stripped.trim()
+    } else if let Some(stripped) = trimmed.strip_prefix("bearer ") {
+        stripped.trim()
+    } else {
+        trimmed
+    }
+}
+
+/// Helper to normalize base_url for OpenAI chat completions
+pub fn normalize_openai_endpoint(base_url: &str) -> String {
+    let clean_base = base_url.trim().trim_end_matches('/');
+    if clean_base.ends_with("/chat/completions") {
+        clean_base.to_string()
+    } else {
+        format!("{}/chat/completions", clean_base)
+    }
+}
+
+/// Helper to normalize base_url for Anthropic messages
+pub fn normalize_anthropic_endpoint(base_url: &str) -> String {
+    let clean_base = base_url.trim().trim_end_matches('/');
+    if clean_base.ends_with("/messages") {
+        clean_base.to_string()
+    } else {
+        format!("{}/messages", clean_base)
+    }
+}
+
 /// Universal Gateway function to execute chat completion requests to OpenAI-compatible or Anthropic APIs
 pub async fn send_completion(
     provider: &str,
@@ -58,12 +90,13 @@ async fn send_openai_completion(
     sys_prompt: &str,
     user_text: &str,
 ) -> Result<String, String> {
-    let endpoint = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    let endpoint = normalize_openai_endpoint(base_url);
+    let clean_key = clean_api_key(raw_key);
 
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
-    let auth_header_val = format!("Bearer {}", raw_key);
+    let auth_header_val = format!("Bearer {}", clean_key);
     let mut header_value = HeaderValue::from_str(&auth_header_val)
         .map_err(|_| "Invalid characters in API key header".to_string())?;
     header_value.set_sensitive(true);
@@ -119,7 +152,8 @@ async fn send_anthropic_completion(
     sys_prompt: &str,
     user_text: &str,
 ) -> Result<String, String> {
-    let endpoint = format!("{}/messages", base_url.trim_end_matches('/'));
+    let endpoint = normalize_anthropic_endpoint(base_url);
+    let clean_key = clean_api_key(raw_key);
 
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -128,13 +162,20 @@ async fn send_anthropic_completion(
         HeaderValue::from_static("2023-06-01"),
     );
 
-    let mut api_key_val = HeaderValue::from_str(raw_key)
+    let mut api_key_val = HeaderValue::from_str(clean_key)
         .map_err(|_| "Invalid characters in API key header".to_string())?;
     api_key_val.set_sensitive(true);
     headers.insert(
         reqwest::header::HeaderName::from_static("x-api-key"),
         api_key_val,
     );
+
+    // Also supply Authorization: Bearer for reverse proxies (like Taynik, OpenRouter, LiteLLM)
+    let auth_header_val = format!("Bearer {}", clean_key);
+    if let Ok(mut bearer_val) = HeaderValue::from_str(&auth_header_val) {
+        bearer_val.set_sensitive(true);
+        headers.insert(AUTHORIZATION, bearer_val);
+    }
 
     let body = serde_json::json!({
         "model": model_name,
@@ -202,6 +243,11 @@ fn extract_provider_error(status_code: u16, body_text: &str) -> String {
         if let Some(msg) = json.get("message").and_then(|m| m.as_str()) {
             return format!("API Error: {}", msg);
         }
+
+        // FastAPI / Python proxy format: {"detail": "..."}
+        if let Some(detail) = json.get("detail").and_then(|d| d.as_str()) {
+            return format!("API Error: {}", detail);
+        }
     }
 
     let snippet = if body_text.len() > 200 {
@@ -249,5 +295,47 @@ mod tests {
         let plain_err = "502 Bad Gateway from upstream proxy";
         let err = extract_provider_error(502, plain_err);
         assert_eq!(err, "API Error (status 502): 502 Bad Gateway from upstream proxy");
+    }
+
+    #[test]
+    fn test_extract_fastapi_detail_error_message() {
+        let detail_json = r#"{"detail":"Требуется API-ключ (Authorization: Bearer tk_ai_… или tk_free_…)"}"#;
+        let err = extract_provider_error(401, detail_json);
+        assert_eq!(
+            err,
+            "API Error: Требуется API-ключ (Authorization: Bearer tk_ai_… или tk_free_…)"
+        );
+    }
+
+    #[test]
+    fn test_clean_api_key_normalization() {
+        assert_eq!(clean_api_key("  tk_ai_12345  "), "tk_ai_12345");
+        assert_eq!(clean_api_key("Bearer tk_ai_12345"), "tk_ai_12345");
+        assert_eq!(clean_api_key("bearer tk_free_9999"), "tk_free_9999");
+        assert_eq!(clean_api_key("  Bearer   tk_ai_abc  "), "tk_ai_abc");
+    }
+
+    #[test]
+    fn test_endpoint_normalization() {
+        assert_eq!(
+            normalize_openai_endpoint("https://api.openai.com/v1"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(
+            normalize_openai_endpoint("https://api.openai.com/v1/"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(
+            normalize_openai_endpoint("https://taynik.store/v1/chat/completions"),
+            "https://taynik.store/v1/chat/completions"
+        );
+        assert_eq!(
+            normalize_anthropic_endpoint("https://api.anthropic.com/v1"),
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert_eq!(
+            normalize_anthropic_endpoint("https://api.anthropic.com/v1/messages/"),
+            "https://api.anthropic.com/v1/messages"
+        );
     }
 }
