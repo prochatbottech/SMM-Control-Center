@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { getVersion } from '@tauri-apps/api/app';
 import { AccountsView } from './components/AccountsView';
 import { PostsView } from './components/PostsView';
 import { ContentGrabberView } from './components/ContentGrabberView';
@@ -17,7 +18,12 @@ import { useSystemLogs } from './hooks/useSystemLogs';
 type ActiveTab = 'posts' | 'grabber' | 'accounts' | 'crm' | 'analytics' | 'settings';
 
 export function App() {
+  const [appVersion, setAppVersion] = useState('0.1.0');
   const [activeTab, setActiveTab] = useState<ActiveTab>('posts');
+
+  useEffect(() => {
+    getVersion().then((ver) => setAppVersion(ver)).catch(() => {});
+  }, []);
   const [showAISettings, setShowAISettings] = useState(false);
   const [isTerminalOpen, setIsTerminalOpen] = useState(false);
   const { logs, clearLogs, errorCount, warnCount } = useSystemLogs();
@@ -48,7 +54,7 @@ export function App() {
               <div className="font-bold text-base tracking-tight text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
                 SMM Control Center
                 <span className="text-[10px] uppercase font-semibold tracking-wider px-1.5 py-0.5 rounded-sm bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">
-                  v0.1.0
+                  v{appVersion}
                 </span>
               </div>
             </div>
