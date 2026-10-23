@@ -1,4 +1,5 @@
 import React from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import {
   Trash2,
   Lock,
@@ -8,10 +9,13 @@ import {
   Globe,
   Loader2,
   Calendar,
+  Plus,
+  RefreshCw,
 } from 'lucide-react';
-import { Account } from '../api/db';
-import { useDeleteAccountMutation } from '../hooks/useAccounts';
+import { Account, vkAddCommunity, vkChangeCommunity } from '../api/db';
+import { useDeleteAccountMutation, ACCOUNTS_QUERY_KEY } from '../hooks/useAccounts';
 import { ConfirmDialog } from './ConfirmDialog';
+import { PromptDialog } from './PromptDialog';
 import { toast } from 'sonner';
 
 interface AccountCardProps {
@@ -21,6 +25,30 @@ interface AccountCardProps {
 export const AccountCard: React.FC<AccountCardProps> = ({ account }) => {
   const deleteMutation = useDeleteAccountMutation();
   const [confirmDelete, setConfirmDelete] = React.useState(false);
+  const queryClient = useQueryClient();
+  const [promptMode, setPromptMode] = React.useState<'add' | 'change' | null>(null);
+  const [promptPending, setPromptPending] = React.useState(false);
+
+  const handlePromptConfirm = async (value: string) => {
+    if (!promptMode) return;
+    setPromptPending(true);
+    try {
+      if (promptMode === 'add') {
+        const created = await vkAddCommunity(account.id, value);
+        toast.success(`Добавлено сообщество: ${created.name}`);
+      } else {
+        const res = await vkChangeCommunity(account.id, value);
+        toast.success(`Сообщество изменено: ${res.title}`);
+      }
+      await queryClient.invalidateQueries({ queryKey: ACCOUNTS_QUERY_KEY });
+      setPromptMode(null);
+    } catch (err: any) {
+      const msg = typeof err === 'string' ? err : err?.message || String(err);
+      toast.error(`Ошибка: ${msg}`);
+    } finally {
+      setPromptPending(false);
+    }
+  };
 
   const handleDelete = () => {
     deleteMutation.mutate(account.id, {
@@ -127,6 +155,36 @@ export const AccountCard: React.FC<AccountCardProps> = ({ account }) => {
             {account.masked_token || `${account.platform}_***encrypted`}
           </p>
         </div>
+
+        {/* VK: publishing target + community management */}
+        {account.platform === 'vk' && (
+          <div className="mt-3 space-y-2">
+            <div className="text-xs text-zinc-500 dark:text-zinc-400">
+              Публикация:{' '}
+              <span className="font-medium text-zinc-700 dark:text-zinc-300">
+                {account.target_title || 'личная стена'}
+              </span>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => setPromptMode('add')}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 rounded-lg transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                Добавить сообщество
+              </button>
+              <button
+                type="button"
+                onClick={() => setPromptMode('change')}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-zinc-600 dark:text-zinc-300 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 border border-zinc-200 dark:border-zinc-700 rounded-lg transition-colors"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                Сменить сообщество
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Footer: Date */}
@@ -142,6 +200,17 @@ export const AccountCard: React.FC<AccountCardProps> = ({ account }) => {
         isPending={deleteMutation.isPending}
         onConfirm={handleDelete}
         onCancel={() => setConfirmDelete(false)}
+      />
+
+      <PromptDialog
+        open={promptMode !== null}
+        title={promptMode === 'add' ? 'Добавить сообщество' : 'Сменить сообщество'}
+        description="Введите ссылку, короткое имя или ID сообщества (например, vk.com/mygroup или 12345678)."
+        placeholder="vk.com/mygroup"
+        confirmLabel={promptMode === 'add' ? 'Добавить' : 'Сохранить'}
+        isPending={promptPending}
+        onConfirm={handlePromptConfirm}
+        onCancel={() => setPromptMode(null)}
       />
     </div>
   );

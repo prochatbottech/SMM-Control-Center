@@ -640,4 +640,25 @@ export async function setAccountTarget(  id: string,
   });
 }
 
+/**
+ * Add ANOTHER VK community to an existing account, reusing its stored token
+ * (no re-login). Returns the newly created account.
+ */
+export async function vkAddCommunity(accountId: string, query: string): Promise<Account> {
+  return await safeInvoke<Account>('vk_add_community', { accountId, query });
+}
+
+/**
+ * Change the VK community of an existing account (reuses stored token).
+ */
+export async function vkChangeCommunity(
+  accountId: string,
+  query: string
+): Promise<{ targetId: string; title: string }> {
+  return await safeInvoke<{ targetId: string; title: string }>('vk_change_community', {
+    accountId,
+    query,
+  });
+}
+
 

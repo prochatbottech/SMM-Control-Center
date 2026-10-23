@@ -361,27 +361,21 @@ pub async fn set_account_target(
     .await
 }
 
-/// Tauri Command: resolve a VK community from a numeric id, short name or URL.
-/// Uses `utils.resolveScreenName` (works even when `groups.get` is restricted).
-/// Returns { targetId: "-<group_id>" | "<user_id>", title }.
-#[tauri::command]
-pub async fn vk_resolve_target(token: String, query: String) -> Result<serde_json::Value, String> {
+/// Resolve a VK community from a numeric id, short name or URL.
+/// Returns (target_id, title). Uses utils.resolveScreenName (works even when
+/// groups.get is restricted by token profile type).
+async fn resolve_vk_target(token: &str, query: &str) -> Result<(String, String), String> {
     let raw = query.trim();
     if raw.is_empty() {
         return Err("Укажите сообщество (ссылку, короткое имя или ID)".to_string());
     }
 
-    // Pure numeric id (or id12345, or -12345) -> treat as community.
     let numeric = raw.trim_start_matches('-');
     let numeric = numeric.strip_prefix("id").unwrap_or(numeric);
     if let Ok(id) = numeric.parse::<i64>() {
-        return Ok(serde_json::json!({
-            "targetId": format!("-{}", id.abs()),
-            "title": format!("Сообщество {}", id.abs())
-        }));
+        return Ok((format!("-{}", id.abs()), format!("Сообщество {}", id.abs())));
     }
 
-    // Strip URL prefixes / leading @ to get a screen name.
     let mut name = raw;
     for p in [
         "https://vk.com/",
@@ -407,7 +401,7 @@ pub async fn vk_resolve_target(token: String, query: String) -> Result<serde_jso
         .build()
         .map_err(|_| "Не удалось инициализировать HTTP-клиент".to_string())?;
     let params = [
-        ("access_token", token.as_str()),
+        ("access_token", token),
         ("v", "5.199"),
         ("screen_name", name),
     ];
@@ -433,7 +427,6 @@ pub async fn vk_resolve_target(token: String, query: String) -> Result<serde_jso
         .get("response")
         .ok_or_else(|| "VK не вернул response".to_string())?;
 
-    // Not found -> [] (empty array) in some API versions.
     if let Some(arr) = response.as_array() {
         if arr.is_empty() {
             return Err(format!("Сообщество '{}' не найдено", name));
@@ -452,5 +445,87 @@ pub async fn vk_resolve_target(token: String, query: String) -> Result<serde_jso
         format!("{}", oid)
     };
 
-    Ok(serde_json::json!({ "targetId": target_id, "title": name }))
+    Ok((target_id, name.to_string()))
+}
+
+/// Tauri Command: resolve a VK community (used by the add-account form).
+#[tauri::command]
+pub async fn vk_resolve_target(token: String, query: String) -> Result<serde_json::Value, String> {
+    let (target_id, title) = resolve_vk_target(&token, &query).await?;
+    Ok(serde_json::json!({ "targetId": target_id, "title": title }))
+}
+
+/// Decrypt an account's stored token (helper).
+async fn decrypt_account_token(
+    pool: &sqlx::SqlitePool,
+    account_id: &str,
+) -> Result<(crate::models::Account, String), String> {
+    let acc = db::get_account_by_id(pool, account_id)
+        .await?
+        .ok_or_else(|| "Аккаунт не найден".to_string())?;
+    let key = crypto::get_or_generate_key().map_err(|e| e.to_string())?;
+    let token = crypto::decrypt_token(&acc.encrypted_token, &key)
+        .map_err(|e| format!("Не удалось расшифровать токен: {}", e))?;
+    Ok((acc, token))
+}
+
+/// Command: add ANOTHER community to an existing VK account, reusing its stored
+/// token (no re-login). Creates a new account row with the same token + new target.
+#[tauri::command]
+pub async fn vk_add_community(
+    state: State<'_, DbState>,
+    account_id: String,
+    query: String,
+) -> Result<serde_json::Value, String> {
+    let (acc, token) = decrypt_account_token(&state.pool, &account_id).await?;
+    let (target_id, title) = resolve_vk_target(&token, &query).await?;
+
+    // Reuse the already-encrypted token as-is (no re-encryption needed).
+    let new_acc = db::create_account(
+        &state.pool,
+        CreateAccountInput {
+            id: None,
+            platform: acc.platform.clone(),
+            name: title.clone(),
+            encrypted_token: acc.encrypted_token.clone(),
+            created_at: None,
+        },
+    )
+    .await?;
+
+    db::update_account_target(
+        &state.pool,
+        &new_acc.id,
+        "vk_id",
+        Some(&target_id),
+        Some(&title),
+        acc.owner_external_id.as_deref(),
+    )
+    .await?;
+
+    let safe = new_acc.with_masked_token();
+    serde_json::to_value(&safe).map_err(|e| format!("Serialization error: {}", e))
+}
+
+/// Command: change the community of an existing VK account (reuses stored token).
+#[tauri::command]
+pub async fn vk_change_community(
+    state: State<'_, DbState>,
+    account_id: String,
+    query: String,
+) -> Result<serde_json::Value, String> {
+    let (acc, token) = decrypt_account_token(&state.pool, &account_id).await?;
+    let (target_id, title) = resolve_vk_target(&token, &query).await?;
+
+    db::update_account_target(
+        &state.pool,
+        &account_id,
+        "vk_id",
+        Some(&target_id),
+        Some(&title),
+        acc.owner_external_id.as_deref(),
+    )
+    .await?;
+
+    Ok(serde_json::json!({ "targetId": target_id, "title": title }))
 }

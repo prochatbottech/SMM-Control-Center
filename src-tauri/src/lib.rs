@@ -167,6 +167,8 @@ pub fn run() {
             commands::delete_account,
             commands::vk_list_communities,
             commands::vk_resolve_target,
+            commands::vk_add_community,
+            commands::vk_change_community,
             commands::set_account_target,
             vk_oauth::vk_oauth_start,
             vk_oauth::vk_oauth_complete,
