@@ -360,3 +360,97 @@ pub async fn set_account_target(
     )
     .await
 }
+
+/// Tauri Command: resolve a VK community from a numeric id, short name or URL.
+/// Uses `utils.resolveScreenName` (works even when `groups.get` is restricted).
+/// Returns { targetId: "-<group_id>" | "<user_id>", title }.
+#[tauri::command]
+pub async fn vk_resolve_target(token: String, query: String) -> Result<serde_json::Value, String> {
+    let raw = query.trim();
+    if raw.is_empty() {
+        return Err("Укажите сообщество (ссылку, короткое имя или ID)".to_string());
+    }
+
+    // Pure numeric id (or id12345, or -12345) -> treat as community.
+    let numeric = raw.trim_start_matches('-');
+    let numeric = numeric.strip_prefix("id").unwrap_or(numeric);
+    if let Ok(id) = numeric.parse::<i64>() {
+        return Ok(serde_json::json!({
+            "targetId": format!("-{}", id.abs()),
+            "title": format!("Сообщество {}", id.abs())
+        }));
+    }
+
+    // Strip URL prefixes / leading @ to get a screen name.
+    let mut name = raw;
+    for p in [
+        "https://vk.com/",
+        "http://vk.com/",
+        "vk.com/",
+        "https://m.vk.com/",
+        "http://m.vk.com/",
+        "m.vk.com/",
+        "@",
+    ] {
+        if let Some(s) = name.strip_prefix(p) {
+            name = s;
+            break;
+        }
+    }
+    let name = name.trim_matches('/');
+    if name.is_empty() {
+        return Err("Не удалось разобрать ссылку сообщества".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|_| "Не удалось инициализировать HTTP-клиент".to_string())?;
+    let params = [
+        ("access_token", token.as_str()),
+        ("v", "5.199"),
+        ("screen_name", name),
+    ];
+    let resp = client
+        .post("https://api.vk.com/method/utils.resolveScreenName")
+        .form(&params)
+        .send()
+        .await
+        .map_err(|_| "Сетевая ошибка при обращении к VK API".to_string())?;
+    let status = resp.status();
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|_| format!("Некорректный ответ VK API (HTTP {})", status.as_u16()))?;
+
+    if let Some(err) = json.get("error") {
+        let code = err.get("error_code").and_then(|v| v.as_i64()).unwrap_or(0);
+        let msg = err.get("error_msg").and_then(|v| v.as_str()).unwrap_or("VK error");
+        return Err(format!("VK API error {}: {}", code, msg));
+    }
+
+    let response = json
+        .get("response")
+        .ok_or_else(|| "VK не вернул response".to_string())?;
+
+    // Not found -> [] (empty array) in some API versions.
+    if let Some(arr) = response.as_array() {
+        if arr.is_empty() {
+            return Err(format!("Сообщество '{}' не найдено", name));
+        }
+    }
+
+    let oid = response
+        .get("object_id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| format!("Не удалось определить сообщество '{}'", name))?;
+    let typ = response.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+    let target_id = if typ == "group" {
+        format!("-{}", oid)
+    } else {
+        format!("{}", oid)
+    };
+
+    Ok(serde_json::json!({ "targetId": target_id, "title": name }))
+}

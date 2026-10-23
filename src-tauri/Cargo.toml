@@ -1,6 +1,6 @@
 [package]
 name = "smm-control-center"
-version = "0.1.14"
+version = "0.1.15"
 description = "SMM Control Center"
 authors = ["you"]
 edition = "2024"

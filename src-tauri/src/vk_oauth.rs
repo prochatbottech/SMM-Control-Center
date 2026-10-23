@@ -143,6 +143,12 @@ pub async fn vk_oauth_complete(redirect_url: String) -> Result<serde_json::Value
         return Err(format!("VK ID: {} {}", err, desc));
     }
 
+    // Classic OAuth (implicit) token flow: access_token is in the URL fragment.
+    if let Some(token) = params.get("access_token") {
+        let user_id = params.get("user_id").cloned();
+        return Ok(serde_json::json!({ "accessToken": token, "userId": user_id }));
+    }
+
     let code = params.get("code").cloned().ok_or_else(|| {
         "В вставленном URL нет параметра code. Скопируйте полный адрес страницы после входа."
             .to_string()

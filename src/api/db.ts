@@ -607,10 +607,23 @@ export async function vkListCommunities(token: string): Promise<VkCommunity[]> {
 }
 
 /**
+ * Resolve a VK community from a numeric id, short name, or URL
+ * (uses utils.resolveScreenName — works even if groups.get is restricted).
+ */
+export async function vkResolveTarget(
+  token: string,
+  query: string
+): Promise<{ targetId: string; title: string }> {
+  return await safeInvoke<{ targetId: string; title: string }>('vk_resolve_target', {
+    token,
+    query,
+  });
+}
+
+/**
  * Persist the publishing target (community / channel / group) for an account.
  */
-export async function setAccountTarget(
-  id: string,
+export async function setAccountTarget(  id: string,
   p: {
     authType?: string;
     targetId?: string | null;

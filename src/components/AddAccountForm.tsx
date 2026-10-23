@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Eye, EyeOff, Loader2, ShieldCheck, Users } from 'lucide-react';
-import { Platform, VkCommunity, vkListCommunities, vkOauthStart, vkOauthComplete, setAccountTarget } from '../api/db';
+import { Platform, VkCommunity, vkListCommunities, vkResolveTarget, vkOauthStart, vkOauthComplete, setAccountTarget } from '../api/db';
 import { useCreateAccountMutation } from '../hooks/useAccounts';
 import { toast } from 'sonner';
 
@@ -29,6 +29,7 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
   const [vkTarget, setVkTarget] = useState<{ id: string; title: string } | null>(null);
   const [vkAuthStarted, setVkAuthStarted] = useState(false);
   const [vkRedirectUrl, setVkRedirectUrl] = useState('');
+  const [vkQuery, setVkQuery] = useState('');
 
   const createMutation = useCreateAccountMutation();
 
@@ -44,6 +45,7 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
     setVkTarget(null);
     setVkAuthStarted(false);
     setVkRedirectUrl('');
+    setVkQuery('');
     setName('');
     setPlatform('vk');
   };
@@ -90,6 +92,24 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
     } catch (err: any) {
       const msg = typeof err === 'string' ? err : err?.message || String(err);
       toast.error(`VK вход: ${msg}`);
+      setVkLoading(false);
+    }
+  };
+
+  const handleVkResolve = async () => {
+    if (!vkQuery.trim()) {
+      toast.error('Введите ссылку, ID или короткое имя сообщества');
+      return;
+    }
+    setVkLoading(true);
+    try {
+      const res = await vkResolveTarget(vkToken, vkQuery.trim());
+      setVkTarget({ id: res.targetId, title: res.title });
+      toast.success(`Выбрано сообщество: ${res.title}`);
+    } catch (err: any) {
+      const msg = typeof err === 'string' ? err : err?.message || String(err);
+      toast.error(`Не удалось определить сообщество: ${msg}`);
+    } finally {
       setVkLoading(false);
     }
   };
@@ -263,6 +283,35 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
               <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider">
                 Куда публиковать
               </label>
+
+              <div className="space-y-1.5 p-2.5 border border-zinc-200 dark:border-zinc-700 rounded-xl bg-zinc-50/50 dark:bg-zinc-800/30">
+                <label className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                  Если список недоступен — укажите сообщество вручную (ссылка, ID или короткое имя):
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={vkQuery}
+                    onChange={(e) => setVkQuery(e.target.value)}
+                    disabled={vkLoading}
+                    placeholder="vk.com/mygroup или 12345678 или mygroup"
+                    className="flex-1 px-3 py-2 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-lg text-xs font-mono text-zinc-900 dark:text-zinc-100 placeholder-zinc-400 focus:outline-hidden focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 disabled:opacity-50"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleVkResolve}
+                    disabled={vkLoading || !vkQuery.trim()}
+                    className="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+                  >
+                    Определить
+                  </button>
+                </div>
+                {vkTarget && (
+                  <p className="text-[11px] text-emerald-600 dark:text-emerald-400">
+                    Выбрано: {vkTarget.title} (id {vkTarget.id})
+                  </p>
+                )}
+              </div>
 
               {vkLoading ? (
                 <div className="flex items-center gap-2 text-xs text-zinc-400 py-2">
