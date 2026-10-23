@@ -11,6 +11,7 @@ pub trait PostPublisher: Send + Sync {
         content: &str,
         media_urls: &[String],
         format: &str,
+        target_id: Option<&str>,
     ) -> impl std::future::Future<Output = Result<String, String>> + Send;
 }
 
@@ -314,50 +315,34 @@ impl RealPublisher {
         Self::parse_telegram_response(status, &body_json)
     }
 
-    /// Detect a VK community id for a community (group) access token.
-    /// `groups.getById` without `group_ids` returns the community that owns the token.
-    /// Returns None for user tokens (or if detection fails), meaning "post as the user".
-    async fn resolve_vk_group_id(&self, base_url: &str, token: &str) -> Option<i64> {
-        let url = format!("{}/method/groups.getById", base_url);
-        let params = [("access_token", token), ("v", "5.199")];
-        let resp = self.client.post(&url).form(&params).send().await.ok()?;
-        let json: serde_json::Value = resp.json().await.ok()?;
-        let response = json.get("response")?;
-
-        if let Some(arr) = response.as_array() {
-            return arr.first().and_then(|g| g.get("id")).and_then(|v| v.as_i64());
-        }
-        for key in ["groups", "items"] {
-            if let Some(arr) = response.get(key).and_then(|v| v.as_array()) {
-                if let Some(id) = arr.first().and_then(|g| g.get("id")).and_then(|v| v.as_i64()) {
-                    return Some(id);
-                }
-            }
-        }
-        response.get("id").and_then(|v| v.as_i64())
-    }
-
     /// Internal VKontakte publishing logic (text only or with photos)
     async fn publish_vk(
         &self,
         token: &str,
         content: &str,
         media_urls: &[String],
+        target_id: Option<&str>,
     ) -> Result<String, String> {
         let base_url = self
             .vk_base_url
             .as_deref()
             .unwrap_or("https://api.vk.com");
 
-        // Detect community (group) token. Community tokens must post with
-        // owner_id = -<group_id> and from_group = 1, otherwise VK returns
-        // error 27 "method is unavailable with group auth".
-        let group_id = self.resolve_vk_group_id(base_url, token).await;
-        let owner_id_neg = group_id.map(|g| format!("-{}", g));
+        // target_id semantics:
+        //   Some("-<group_id>") -> post to that community (owner_id negative, from_group=1)
+        //   Some("<user_id>")   -> post to the personal wall
+        //   None                -> post to the token owner's wall
+        let target = target_id.map(|s| s.trim()).filter(|s| !s.is_empty());
+        let is_group = target.map(|t| t.starts_with('-')).unwrap_or(false);
+        let photo_group_id: Option<i64> = if is_group {
+            target.and_then(|t| t.trim_start_matches('-').parse::<i64>().ok())
+        } else {
+            None
+        };
 
         let mut attachments: Vec<String> = Vec::new();
         for path in media_urls {
-            let attachment = self.upload_vk_photo(base_url, token, path, group_id).await?;
+            let attachment = self.upload_vk_photo(base_url, token, path, photo_group_id).await?;
             attachments.push(attachment);
         }
 
@@ -368,9 +353,11 @@ impl RealPublisher {
             ("message", content),
         ];
 
-        if let Some(ref owner_id) = owner_id_neg {
-            params.push(("owner_id", owner_id.as_str()));
-            params.push(("from_group", "1"));
+        if let Some(t) = target {
+            params.push(("owner_id", t));
+            if is_group {
+                params.push(("from_group", "1"));
+            }
         }
 
         let attachments_joined = attachments.join(",");
@@ -719,6 +706,7 @@ impl PostPublisher for RealPublisher {
         content: &str,
         media_urls: &[String],
         format: &str,
+        target_id: Option<&str>,
     ) -> Result<String, String> {
         let platform_norm = platform.trim().to_lowercase();
         let is_article = format.trim().eq_ignore_ascii_case("article");
@@ -726,7 +714,7 @@ impl PostPublisher for RealPublisher {
         // posts automatically fall back to a rich (article) message to avoid rejection.
         let too_long_for_post = content.encode_utf16().count() > 4096;
         match platform_norm.as_str() {
-            "vk" => self.publish_vk(token, content, media_urls).await,
+            "vk" => self.publish_vk(token, content, media_urls, target_id).await,
             "tg" | "telegram" => {
                 if is_article || (too_long_for_post && media_urls.is_empty()) {
                     self.publish_telegram_rich(token, account_name, content).await
@@ -784,6 +772,7 @@ impl PostPublisher for MockPublisher {
         content: &str,
         media_urls: &[String],
         _format: &str,
+        _target_id: Option<&str>,
     ) -> Result<String, String> {
         println!(
             "[MockPublisher] Starting network request to '{}' for account '{}' (content_len: {}, media_count: {})",
@@ -821,12 +810,12 @@ mod tests {
     async fn test_unsupported_platform() {
         let publisher = RealPublisher::new();
         let res = publisher
-            .publish("instagram", "insta_user", "tok123", "Hello IG", &[], "post")
+            .publish("instagram", "insta_user", "tok123", "Hello IG", &[], "post", None)
             .await;
         assert_eq!(res, Err("Unsupported platform".to_string()));
 
         let res_twitter = publisher
-            .publish("twitter", "x_user", "tok456", "Hello X", &[], "post")
+            .publish("twitter", "x_user", "tok456", "Hello X", &[], "post", None)
             .await;
         assert_eq!(res_twitter, Err("Unsupported platform".to_string()));
     }
@@ -844,7 +833,7 @@ mod tests {
 
         // TG network error
         let tg_res = publisher
-            .publish("tg", "@test_chat", secret_token, "Test message", &[], "post")
+            .publish("tg", "@test_chat", secret_token, "Test message", &[], "post", None)
             .await;
         assert!(tg_res.is_err());
         let tg_err = tg_res.unwrap_err();
@@ -856,7 +845,7 @@ mod tests {
 
         // VK network error
         let vk_res = publisher
-            .publish("vk", "VK User", secret_token, "Test message", &[], "post")
+            .publish("vk", "VK User", secret_token, "Test message", &[], "post", None)
             .await;
         assert!(vk_res.is_err());
         let vk_err = vk_res.unwrap_err();
@@ -968,7 +957,7 @@ mod tests {
         let missing_path = r"C:\definitely\not\existing\photo.jpg";
 
         let vk_res = publisher
-            .publish("vk", "VK User", secret_token, "Hello", &[missing_path.to_string()], "post")
+            .publish("vk", "VK User", secret_token, "Hello", &[missing_path.to_string()], "post", None)
             .await;
         assert!(vk_res.is_err());
         let err = vk_res.unwrap_err();
@@ -999,7 +988,7 @@ mod tests {
     async fn test_publish_ok_invalid_credentials_returns_clean_error() {
         let publisher = RealPublisher::new();
         // Not valid JSON creds
-        let res = publisher.publish("ok", "OK Group", "not-a-json", "Hello", &[], "post").await;
+        let res = publisher.publish("ok", "OK Group", "not-a-json", "Hello", &[], "post", None).await;
         assert!(res.is_err());
         let err = res.unwrap_err();
         assert!(err.contains("неверный формат учётных данных"));

@@ -293,6 +293,8 @@ mod tests {
         sqlx::query(crate::db::MIGRATION_02_SQL).execute(&pool).await.unwrap();
         sqlx::query(crate::db::MIGRATION_03_SQL).execute(&pool).await.unwrap();
         sqlx::query(crate::db::MIGRATION_04_SQL).execute(&pool).await.unwrap();
+        sqlx::query(crate::db::MIGRATION_05_SQL).execute(&pool).await.unwrap();
+        sqlx::query(crate::db::MIGRATION_06_SQL).execute(&pool).await.unwrap();
 
         let test_master_key = [99u8; 32];
         let enc_token = crypto::encrypt_token("vk_token", &test_master_key).unwrap();
@@ -384,6 +386,8 @@ mod tests {
         sqlx::query(crate::db::MIGRATION_02_SQL).execute(&pool).await.unwrap();
         sqlx::query(crate::db::MIGRATION_03_SQL).execute(&pool).await.unwrap();
         sqlx::query(crate::db::MIGRATION_04_SQL).execute(&pool).await.unwrap();
+        sqlx::query(crate::db::MIGRATION_05_SQL).execute(&pool).await.unwrap();
+        sqlx::query(crate::db::MIGRATION_06_SQL).execute(&pool).await.unwrap();
 
         let test_master_key = [88u8; 32];
         let enc_token = crypto::encrypt_token("tg_bot_token", &test_master_key).unwrap();

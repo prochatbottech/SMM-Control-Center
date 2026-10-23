@@ -355,6 +355,8 @@ mod tests {
         sqlx::query(crate::db::MIGRATION_02_SQL).execute(&pool).await.unwrap();
         sqlx::query(crate::db::MIGRATION_03_SQL).execute(&pool).await.unwrap();
         sqlx::query(crate::db::MIGRATION_04_SQL).execute(&pool).await.unwrap();
+        sqlx::query(crate::db::MIGRATION_05_SQL).execute(&pool).await.unwrap();
+        sqlx::query(crate::db::MIGRATION_06_SQL).execute(&pool).await.unwrap();
 
         let fake_lead_id = Uuid::new_v4();
         let fake_cred_id = Uuid::new_v4();
@@ -387,6 +389,8 @@ mod tests {
         sqlx::query(crate::db::MIGRATION_02_SQL).execute(&pool).await.unwrap();
         sqlx::query(crate::db::MIGRATION_03_SQL).execute(&pool).await.unwrap();
         sqlx::query(crate::db::MIGRATION_04_SQL).execute(&pool).await.unwrap();
+        sqlx::query(crate::db::MIGRATION_05_SQL).execute(&pool).await.unwrap();
+        sqlx::query(crate::db::MIGRATION_06_SQL).execute(&pool).await.unwrap();
 
         // Create a lead
         let lead = db::add_lead(

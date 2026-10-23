@@ -272,3 +272,91 @@ pub async fn generate_ai_rewrite(
     )
     .await
 }
+
+/// A VK community (group) the user administers.
+#[derive(serde::Serialize)]
+pub struct VkCommunity {
+    pub id: i64,
+    pub name: String,
+    pub photo: Option<String>,
+}
+
+/// Tauri Command: list VK communities the authorized user administers.
+/// Requires a user access token with the `groups` scope.
+/// Invariant: token is kept out of error strings; only error_code/error_msg are surfaced.
+#[tauri::command]
+pub async fn vk_list_communities(token: String) -> Result<Vec<VkCommunity>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|_| "Не удалось инициализировать HTTP-клиент".to_string())?;
+
+    let url = "https://api.vk.com/method/groups.get";
+    let params = [
+        ("access_token", token.as_str()),
+        ("v", "5.199"),
+        ("filter", "admin"),
+        ("extended", "1"),
+        ("fields", "photo_100"),
+        ("count", "1000"),
+    ];
+
+    let resp = client
+        .post(url)
+        .form(&params)
+        .send()
+        .await
+        .map_err(|_| "Сетевая ошибка при обращении к VK API".to_string())?;
+
+    let status = resp.status();
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|_| format!("Некорректный ответ VK API (HTTP {})", status.as_u16()))?;
+
+    if let Some(err) = json.get("error") {
+        let code = err.get("error_code").and_then(|v| v.as_i64()).unwrap_or(0);
+        let msg = err.get("error_msg").and_then(|v| v.as_str()).unwrap_or("VK error");
+        return Err(format!("VK API error {}: {}", code, msg));
+    }
+
+    let items = json
+        .get("response")
+        .and_then(|r| r.get("items"))
+        .and_then(|i| i.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut out = Vec::with_capacity(items.len());
+    for g in items {
+        if let Some(id) = g.get("id").and_then(|v| v.as_i64()) {
+            let name = g.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let photo = g.get("photo_100").and_then(|v| v.as_str()).map(|s| s.to_string());
+            out.push(VkCommunity { id, name, photo });
+        }
+    }
+
+    Ok(out)
+}
+
+/// Tauri Command: persist the publishing target (community/channel/group) for an account.
+#[tauri::command]
+pub async fn set_account_target(
+    state: State<'_, DbState>,
+    id: String,
+    auth_type: Option<String>,
+    target_id: Option<String>,
+    target_title: Option<String>,
+    owner_external_id: Option<String>,
+) -> Result<bool, String> {
+    let auth_type = auth_type.unwrap_or_else(|| "oauth".to_string());
+    db::update_account_target(
+        &state.pool,
+        &id,
+        &auth_type,
+        target_id.as_deref(),
+        target_title.as_deref(),
+        owner_external_id.as_deref(),
+    )
+    .await
+}

@@ -16,6 +16,7 @@ pub const MIGRATION_02_SQL: &str = include_str!("../migrations/02_add_destinatio
 pub const MIGRATION_03_SQL: &str = include_str!("../migrations/03_api_credentials.sql");
 pub const MIGRATION_04_SQL: &str = include_str!("../migrations/04_crm_and_funnels.sql");
 pub const MIGRATION_05_SQL: &str = include_str!("../migrations/05_post_format.sql");
+pub const MIGRATION_06_SQL: &str = include_str!("../migrations/06_account_target.sql");
 pub const INITIAL_MIGRATION_SQL: &str = MIGRATION_01_SQL;
 
 /// Holds the SQLite connection pool as Tauri managed state
@@ -180,6 +181,45 @@ pub async fn apply_migrations(pool: &SqlitePool) -> Result<(), String> {
             .map_err(|e| format!("Failed to record migration 05: {}", e))?;
     }
 
+    // Migration 06 (Account auth metadata + publishing target)
+    if !applied_versions.contains(&6) {
+        let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('accounts')")
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+
+        if !columns.contains(&"auth_type".to_string()) {
+            sqlx::query("ALTER TABLE accounts ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'oauth'")
+                .execute(pool)
+                .await
+                .map_err(|e| format!("Failed to add auth_type to accounts: {}", e))?;
+        }
+        if !columns.contains(&"target_id".to_string()) {
+            sqlx::query("ALTER TABLE accounts ADD COLUMN target_id TEXT")
+                .execute(pool)
+                .await
+                .map_err(|e| format!("Failed to add target_id to accounts: {}", e))?;
+        }
+        if !columns.contains(&"target_title".to_string()) {
+            sqlx::query("ALTER TABLE accounts ADD COLUMN target_title TEXT")
+                .execute(pool)
+                .await
+                .map_err(|e| format!("Failed to add target_title to accounts: {}", e))?;
+        }
+        if !columns.contains(&"owner_external_id".to_string()) {
+            sqlx::query("ALTER TABLE accounts ADD COLUMN owner_external_id TEXT")
+                .execute(pool)
+                .await
+                .map_err(|e| format!("Failed to add owner_external_id to accounts: {}", e))?;
+        }
+
+        sqlx::query("INSERT INTO _schema_migrations (version, applied_at) VALUES (6, ?)")
+            .bind(chrono::Utc::now().timestamp())
+            .execute(pool)
+            .await
+            .map_err(|e| format!("Failed to record migration 06: {}", e))?;
+    }
+
     Ok(())
 }
 
@@ -231,6 +271,10 @@ pub async fn create_account(pool: &SqlitePool, input: CreateAccountInput) -> Res
         name: name.to_string(),
         encrypted_token: input.encrypted_token,
         created_at,
+        auth_type: Some("oauth".to_string()),
+        target_id: None,
+        target_title: None,
+        owner_external_id: None,
         masked_token: None,
     })
 }
@@ -238,7 +282,7 @@ pub async fn create_account(pool: &SqlitePool, input: CreateAccountInput) -> Res
 pub async fn get_accounts(pool: &SqlitePool) -> Result<Vec<Account>, String> {
     let accounts = sqlx::query_as::<_, Account>(
         r#"
-        SELECT id, platform, name, encrypted_token, created_at
+        SELECT id, platform, name, encrypted_token, created_at, auth_type, target_id, target_title, owner_external_id
         FROM accounts
         ORDER BY created_at DESC
         "#,
@@ -253,7 +297,7 @@ pub async fn get_accounts(pool: &SqlitePool) -> Result<Vec<Account>, String> {
 pub async fn get_account_by_id(pool: &SqlitePool, id: &str) -> Result<Option<Account>, String> {
     let account = sqlx::query_as::<_, Account>(
         r#"
-        SELECT id, platform, name, encrypted_token, created_at
+        SELECT id, platform, name, encrypted_token, created_at, auth_type, target_id, target_title, owner_external_id
         FROM accounts
         WHERE id = ?
         "#,
@@ -264,6 +308,34 @@ pub async fn get_account_by_id(pool: &SqlitePool, id: &str) -> Result<Option<Acc
     .map_err(|e| format!("Failed to fetch account by id '{}': {}", id, e))?;
 
     Ok(account)
+}
+
+/// Persist the publishing target (community / channel / group) and auth metadata for an account.
+pub async fn update_account_target(
+    pool: &SqlitePool,
+    id: &str,
+    auth_type: &str,
+    target_id: Option<&str>,
+    target_title: Option<&str>,
+    owner_external_id: Option<&str>,
+) -> Result<bool, String> {
+    let result = sqlx::query(
+        r#"
+        UPDATE accounts
+        SET auth_type = ?, target_id = ?, target_title = ?, owner_external_id = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(auth_type)
+    .bind(target_id)
+    .bind(target_title)
+    .bind(owner_external_id)
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to update account target: {}", e))?;
+
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn delete_account(pool: &SqlitePool, id: &str) -> Result<bool, String> {

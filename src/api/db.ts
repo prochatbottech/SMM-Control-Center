@@ -42,6 +42,10 @@ export interface Account {
   encrypted_token?: string | null; // Omitted or null on frontend for security
   masked_token?: string; // Display mask (e.g. "vk_***123")
   created_at: number; // Unix timestamp in seconds
+  auth_type?: string | null; // 'oauth' | 'vk_id' | 'tg_session'
+  target_id?: string | null; // VK owner_id / Telegram chat_id / OK gid
+  target_title?: string | null; // Community / channel / group name
+  owner_external_id?: string | null; // Authorizing user id
 }
 
 /**
@@ -564,6 +568,44 @@ export interface WorkerStatus {
 
 export async function getWorkerStatus(): Promise<WorkerStatus> {
   return await safeInvoke<WorkerStatus>('get_worker_status');
+}
+
+// ============================================================================
+// VK ID / Account target API
+// ============================================================================
+
+export interface VkCommunity {
+  id: number;
+  name: string;
+  photo?: string | null;
+}
+
+/**
+ * List VK communities the authorized user administers (requires `groups` scope).
+ */
+export async function vkListCommunities(token: string): Promise<VkCommunity[]> {
+  return await safeInvoke<VkCommunity[]>('vk_list_communities', { token });
+}
+
+/**
+ * Persist the publishing target (community / channel / group) for an account.
+ */
+export async function setAccountTarget(
+  id: string,
+  p: {
+    authType?: string;
+    targetId?: string | null;
+    targetTitle?: string | null;
+    ownerExternalId?: string | null;
+  }
+): Promise<boolean> {
+  return await safeInvoke<boolean>('set_account_target', {
+    id,
+    authType: p.authType ?? 'oauth',
+    targetId: p.targetId ?? null,
+    targetTitle: p.targetTitle ?? null,
+    ownerExternalId: p.ownerExternalId ?? null,
+  });
 }
 
 

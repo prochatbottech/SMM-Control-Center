@@ -153,6 +153,7 @@ pub async fn process_due_posts<P: PostPublisher>(
                     &post.content,
                     &post.media_urls,
                     &post.format,
+                    account.target_id.as_deref(),
                 )
                 .await;
 

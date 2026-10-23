@@ -73,6 +73,8 @@ mod tests {
         sqlx::query(crate::db::MIGRATION_02_SQL).execute(&pool).await.unwrap();
         sqlx::query(crate::db::MIGRATION_03_SQL).execute(&pool).await.unwrap();
         sqlx::query(crate::db::MIGRATION_04_SQL).execute(&pool).await.unwrap();
+        sqlx::query(crate::db::MIGRATION_05_SQL).execute(&pool).await.unwrap();
+        sqlx::query(crate::db::MIGRATION_06_SQL).execute(&pool).await.unwrap();
 
         let metrics = db::get_funnel_metrics(&pool).await.unwrap();
 
@@ -95,6 +97,8 @@ mod tests {
         sqlx::query(crate::db::MIGRATION_02_SQL).execute(&pool).await.unwrap();
         sqlx::query(crate::db::MIGRATION_03_SQL).execute(&pool).await.unwrap();
         sqlx::query(crate::db::MIGRATION_04_SQL).execute(&pool).await.unwrap();
+        sqlx::query(crate::db::MIGRATION_05_SQL).execute(&pool).await.unwrap();
+        sqlx::query(crate::db::MIGRATION_06_SQL).execute(&pool).await.unwrap();
 
         // 10 leads:
         // 2 request_sent

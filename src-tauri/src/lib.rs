@@ -164,6 +164,8 @@ pub fn run() {
             commands::get_accounts,
             commands::get_account_by_id,
             commands::delete_account,
+            commands::vk_list_communities,
+            commands::set_account_target,
             commands::create_post,
             commands::get_posts,
             commands::delete_post,
@@ -342,6 +344,10 @@ mod tests {
             name: "VK Group".to_string(),
             encrypted_token: "super_secret_encrypted_payload".to_string(),
             created_at: 1729440000,
+            auth_type: Some("oauth".to_string()),
+            target_id: None,
+            target_title: None,
+            owner_external_id: None,
             masked_token: None,
         }
         .with_masked_token();
@@ -529,6 +535,7 @@ mod tests {
                 _content: &str,
                 _media_urls: &[String],
                 _format: &str,
+                _target_id: Option<&str>,
             ) -> Result<String, String> {
                 let mut counts = self.call_counts.lock().unwrap();
                 *counts.entry(account_name.to_string()).or_insert(0) += 1;

@@ -10,6 +10,22 @@ pub struct Account {
     #[serde(skip_serializing)]
     pub encrypted_token: String,
     pub created_at: i64,
+    /// Authentication type: 'oauth' | 'tg_session'
+    #[serde(default)]
+    #[sqlx(default)]
+    pub auth_type: Option<String>,
+    /// Publishing target id: VK owner_id, Telegram chat_id, OK gid
+    #[serde(default)]
+    #[sqlx(default)]
+    pub target_id: Option<String>,
+    /// Human-readable target name (community / channel / group)
+    #[serde(default)]
+    #[sqlx(default)]
+    pub target_title: Option<String>,
+    /// External id of the authorizing user (for reference)
+    #[serde(default)]
+    #[sqlx(default)]
+    pub owner_external_id: Option<String>,
     /// Masked representation for frontend display (e.g. "vk_***123")
     #[serde(skip_deserializing)]
     #[sqlx(default)]
