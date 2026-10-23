@@ -198,11 +198,102 @@ pub async fn vk_oauth_complete(redirect_url: String) -> Result<serde_json::Value
         .and_then(|v| v.as_str())
         .ok_or_else(|| format!("VK ID не вернул access_token: {}", json))?
         .to_string();
+    let refresh_token = json
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let expires_in = json.get("expires_in").and_then(|v| v.as_i64()).unwrap_or(3600);
     let user_id = json
         .get("user_id")
         .and_then(|v| v.as_i64())
         .map(|n| n.to_string())
         .or_else(|| json.get("user_id").and_then(|v| v.as_str()).map(|s| s.to_string()));
 
-    Ok(serde_json::json!({ "accessToken": token, "userId": user_id }))
+    let expires_at = chrono::Utc::now().timestamp() + expires_in;
+    let creds = serde_json::json!({
+        "kind": "vk_id",
+        "access_token": token,
+        "refresh_token": refresh_token,
+        "expires_at": expires_at,
+        "device_id": device_id,
+        "user_id": user_id,
+    })
+    .to_string();
+
+    Ok(serde_json::json!({
+        "accessToken": token,
+        "userId": user_id,
+        "creds": creds,
+    }))
+}
+
+/// Given a stored VK credential blob, return a valid access token, refreshing it
+/// via the refresh_token when it is close to expiry.
+/// Returns (access_token, Option<new_creds_json>). If new_creds_json is Some,
+/// the caller should persist it back to the account.
+pub async fn ensure_access_token(creds: &str) -> Result<(String, Option<String>), String> {
+    let v: serde_json::Value = match serde_json::from_str::<serde_json::Value>(creds) {
+        Ok(v) if v.get("kind").and_then(|k| k.as_str()) == Some("vk_id") => v,
+        _ => return Ok((creds.to_string(), None)), // legacy plain token
+    };
+
+    let access = v.get("access_token").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let refresh = v.get("refresh_token").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let expires_at = v.get("expires_at").and_then(|x| x.as_i64()).unwrap_or(0);
+    let device_id = v.get("device_id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+
+    let now = chrono::Utc::now().timestamp();
+    if !access.is_empty() && now < expires_at.saturating_sub(60) {
+        return Ok((access, None));
+    }
+
+    if refresh.is_empty() {
+        return Err("Токен VK истёк, а refresh_token отсутствует — войдите заново".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|_| "Не удалось инициализировать HTTP-клиент".to_string())?;
+    let form = [
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh.as_str()),
+        ("client_id", VK_ID_APP),
+        ("device_id", device_id.as_str()),
+    ];
+    let resp = client
+        .post("https://id.vk.com/oauth2/auth")
+        .form(&form)
+        .send()
+        .await
+        .map_err(|_| "Сетевая ошибка при обновлении токена VK".to_string())?;
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|_| "Некорректный ответ при обновлении токена VK".to_string())?;
+
+    if let Some(err) = json.get("error") {
+        let desc = json.get("error_description").and_then(|v| v.as_str()).unwrap_or("");
+        return Err(format!("VK refresh error: {} {}", err, desc));
+    }
+
+    let new_access = json
+        .get("access_token")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| format!("refresh не вернул access_token: {}", json))?
+        .to_string();
+    let new_refresh = json
+        .get("refresh_token")
+        .and_then(|x| x.as_str())
+        .unwrap_or(&refresh)
+        .to_string();
+    let new_expires_in = json.get("expires_in").and_then(|x| x.as_i64()).unwrap_or(3600);
+
+    let mut nv = v.clone();
+    nv["access_token"] = serde_json::json!(new_access);
+    nv["refresh_token"] = serde_json::json!(new_refresh);
+    nv["expires_at"] = serde_json::json!(now + new_expires_in);
+
+    Ok((new_access, Some(serde_json::to_string(&nv).unwrap_or_default())))
 }

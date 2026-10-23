@@ -338,6 +338,16 @@ pub async fn update_account_target(
     Ok(result.rows_affected() > 0)
 }
 
+pub async fn update_account_token(pool: &SqlitePool, id: &str, encrypted_token: &str) -> Result<bool, String> {
+    let result = sqlx::query("UPDATE accounts SET encrypted_token = ? WHERE id = ?")
+        .bind(encrypted_token)
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to update account token: {}", e))?;
+    Ok(result.rows_affected() > 0)
+}
+
 pub async fn delete_account(pool: &SqlitePool, id: &str) -> Result<bool, String> {
     let result = sqlx::query("DELETE FROM accounts WHERE id = ?")
         .bind(id)

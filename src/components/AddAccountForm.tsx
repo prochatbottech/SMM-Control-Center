@@ -30,6 +30,7 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
   const [vkAuthStarted, setVkAuthStarted] = useState(false);
   const [vkRedirectUrl, setVkRedirectUrl] = useState('');
   const [vkQuery, setVkQuery] = useState('');
+  const [vkCreds, setVkCreds] = useState('');
 
   const createMutation = useCreateAccountMutation();
 
@@ -46,6 +47,7 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
     setVkAuthStarted(false);
     setVkRedirectUrl('');
     setVkQuery('');
+    setVkCreds('');
     setName('');
     setPlatform('vk');
   };
@@ -87,6 +89,7 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
     setVkLoading(true);
     try {
       const res = await vkOauthComplete(vkRedirectUrl.trim());
+      setVkCreds(res.creds ?? res.accessToken);
       handleVkLogin(res.accessToken, res.userId ?? undefined);
       setVkAuthStarted(false);
     } catch (err: any) {
@@ -127,7 +130,7 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
         return;
       }
       createMutation.mutate(
-        { platform: 'vk', name: vkTarget.title, token: vkToken },
+        { platform: 'vk', name: vkTarget.title, token: vkCreds || vkToken },
         {
           onSuccess: async (createdAccount) => {
             try {

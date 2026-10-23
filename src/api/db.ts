@@ -593,10 +593,11 @@ export async function vkOauthStart(): Promise<{ authUrl: string; state: string }
  */
 export async function vkOauthComplete(
   redirectUrl: string
-): Promise<{ accessToken: string; userId?: string | null }> {
-  return await safeInvoke<{ accessToken: string; userId?: string | null }>('vk_oauth_complete', {
-    redirectUrl,
-  });
+): Promise<{ accessToken: string; userId?: string | null; creds?: string }> {
+  return await safeInvoke<{ accessToken: string; userId?: string | null; creds?: string }>(
+    'vk_oauth_complete',
+    { redirectUrl }
+  );
 }
 
 /**

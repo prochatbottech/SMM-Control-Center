@@ -138,6 +138,27 @@ pub async fn process_due_posts<P: PostPublisher>(
                 }
             };
 
+            // VK: refresh the (short-lived) access token if it is about to expire.
+            if account.platform.eq_ignore_ascii_case("vk") {
+                match crate::vk_oauth::ensure_access_token(&plain_token).await {
+                    Ok((access, updated)) => {
+                        if let Some(new_creds) = updated {
+                            if let Ok(enc) = crypto::encrypt_token(&new_creds, &master_key) {
+                                let _ = db::update_account_token(pool, &account.id, &enc).await;
+                            }
+                        }
+                        plain_token = access;
+                    }
+                    Err(e) => {
+                        logger::emit_log_opt(
+                            app,
+                            "warn",
+                            &format!("Не удалось обновить токен VK для '{}': {}", account.name, e),
+                        );
+                    }
+                }
+            }
+
             logger::emit_log_opt(
                 app,
                 "info",
