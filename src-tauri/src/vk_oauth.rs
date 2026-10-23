@@ -91,27 +91,10 @@ fn parse_query(q: &str) -> HashMap<String, String> {
     m
 }
 
-fn open_browser(url: &str) {
-    #[cfg(target_os = "windows")]
-    {
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn();
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open").arg(url).spawn();
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-    }
-}
-
 /// Start VK ID login: build the authorize URL (PKCE), remember verifier/state,
 /// and open it in the system browser. Returns the URL so the UI can also show it.
 #[tauri::command]
-pub fn vk_oauth_start() -> Result<serde_json::Value, String> {
+pub fn vk_oauth_start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
     let verifier = rand_b64(32);
     let challenge = s256(&verifier);
     let state = rand_b64(16);
@@ -132,7 +115,12 @@ pub fn vk_oauth_start() -> Result<serde_json::Value, String> {
         .map_err(|_| "Внутренняя ошибка состояния".to_string())?
         .insert(state.clone(), Pending { verifier, device_id });
 
-    open_browser(&auth_url);
+    {
+        use tauri_plugin_opener::OpenerExt;
+        app.opener()
+            .open_url(&auth_url, None::<&str>)
+            .map_err(|e| format!("Не удалось открыть браузер: {}", e))?;
+    }
 
     Ok(serde_json::json!({ "authUrl": auth_url, "state": state }))
 }
