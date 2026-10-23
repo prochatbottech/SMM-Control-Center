@@ -31,6 +31,7 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
   const [vkRedirectUrl, setVkRedirectUrl] = useState('');
   const [vkQuery, setVkQuery] = useState('');
   const [vkCreds, setVkCreds] = useState('');
+  const [vkManualToken, setVkManualToken] = useState('');
 
   const createMutation = useCreateAccountMutation();
 
@@ -48,6 +49,7 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
     setVkRedirectUrl('');
     setVkQuery('');
     setVkCreds('');
+    setVkManualToken('');
     setName('');
     setPlatform('vk');
   };
@@ -99,8 +101,17 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
     }
   };
 
-  const handleVkResolve = async () => {
-    if (!vkQuery.trim()) {
+  const handleVkManual = () => {
+    const t = vkManualToken.trim();
+    if (!t) {
+      toast.error('Вставьте VK-токен');
+      return;
+    }
+    setVkCreds(t);
+    handleVkLogin(t, '');
+  };
+
+  const handleVkResolve = async () => {    if (!vkQuery.trim()) {
       toast.error('Введите ссылку, ID или короткое имя сообщества');
       return;
     }
@@ -263,6 +274,31 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
                   </button>
                 </div>
               )}
+
+              <div className="pt-2 border-t border-zinc-200 dark:border-zinc-700 space-y-1.5">
+                <label className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                  Или вставьте VK-токен вручную (classic user-token, scope wall,groups,offline), если
+                  вход через VK ID не даёт доступ к API:
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="password"
+                    value={vkManualToken}
+                    onChange={(e) => setVkManualToken(e.target.value)}
+                    disabled={vkLoading || isPending}
+                    placeholder="vk1.a...."
+                    className="flex-1 px-3 py-2 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-lg text-xs font-mono text-zinc-900 dark:text-zinc-100 placeholder-zinc-400 focus:outline-hidden focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 disabled:opacity-50"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleVkManual}
+                    disabled={vkLoading || isPending || !vkManualToken.trim()}
+                    className="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+                  >
+                    Использовать
+                  </button>
+                </div>
+              </div>
             </div>
           ) : (
             <div className="space-y-2">
