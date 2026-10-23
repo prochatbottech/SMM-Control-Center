@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Eye, EyeOff, Loader2, ShieldCheck, Users } from 'lucide-react';
-import { Platform, VkCommunity, vkListCommunities, vkOauthLogin, setAccountTarget } from '../api/db';
+import { Platform, VkCommunity, vkListCommunities, vkOauthStart, vkOauthComplete, setAccountTarget } from '../api/db';
 import { useCreateAccountMutation } from '../hooks/useAccounts';
 import { toast } from 'sonner';
 
@@ -27,6 +27,8 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
   const [vkCommunities, setVkCommunities] = useState<VkCommunity[]>([]);
   const [vkLoading, setVkLoading] = useState(false);
   const [vkTarget, setVkTarget] = useState<{ id: string; title: string } | null>(null);
+  const [vkAuthStarted, setVkAuthStarted] = useState(false);
+  const [vkRedirectUrl, setVkRedirectUrl] = useState('');
 
   const createMutation = useCreateAccountMutation();
 
@@ -40,6 +42,8 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
     setVkUserId('');
     setVkCommunities([]);
     setVkTarget(null);
+    setVkAuthStarted(false);
+    setVkRedirectUrl('');
     setName('');
     setPlatform('vk');
   };
@@ -62,11 +66,27 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
       .finally(() => setVkLoading(false));
   };
 
-  const handleVkLoginClick = async () => {
+  const handleVkStart = async () => {
+    try {
+      await vkOauthStart();
+      setVkAuthStarted(true);
+      setVkRedirectUrl('');
+    } catch (err: any) {
+      const msg = typeof err === 'string' ? err : err?.message || String(err);
+      toast.error(`VK вход: ${msg}`);
+    }
+  };
+
+  const handleVkComplete = async () => {
+    if (!vkRedirectUrl.trim()) {
+      toast.error('Вставьте адрес страницы, на которую перешёл браузер после входа');
+      return;
+    }
     setVkLoading(true);
     try {
-      const res = await vkOauthLogin();
+      const res = await vkOauthComplete(vkRedirectUrl.trim());
       handleVkLogin(res.accessToken, res.userId ?? undefined);
+      setVkAuthStarted(false);
     } catch (err: any) {
       const msg = typeof err === 'string' ? err : err?.message || String(err);
       toast.error(`VK вход: ${msg}`);
@@ -180,12 +200,14 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
           {!vkToken ? (
             <div className="space-y-2">
               <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                Нажмите «Войти через VK» — откроется браузер (вход через VK / OK / Mail.ru).
-                После входа вернитесь в приложение и выберите сообщество.
+                1) Нажмите «Войти через VK» — откроется браузер (вход VK / OK / Mail.ru).
+                <br />
+                2) После входа скопируйте <b>адрес страницы</b> (он начнётся с
+                <code> https://oauth.vk.com/blank.html?...</code>) и вставьте ниже.
               </p>
               <button
                 type="button"
-                onClick={handleVkLoginClick}
+                onClick={handleVkStart}
                 disabled={vkLoading || isPending}
                 className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
               >
@@ -194,8 +216,30 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
                 ) : (
                   <ShieldCheck className="w-4 h-4" />
                 )}
-                {vkLoading ? 'Ожидание входа в браузере…' : 'Войти через VK'}
+                {vkAuthStarted ? 'Открыть браузер ещё раз' : 'Войти через VK'}
               </button>
+
+              {vkAuthStarted && (
+                <div className="space-y-2 pt-1">
+                  <input
+                    type="text"
+                    value={vkRedirectUrl}
+                    onChange={(e) => setVkRedirectUrl(e.target.value)}
+                    disabled={vkLoading}
+                    placeholder="https://oauth.vk.com/blank.html?code=..."
+                    className="w-full px-3.5 py-2.5 bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-200 dark:border-zinc-700 rounded-lg text-xs font-mono text-zinc-900 dark:text-zinc-100 placeholder-zinc-400 focus:outline-hidden focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-colors disabled:opacity-50"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleVkComplete}
+                    disabled={vkLoading || !vkRedirectUrl.trim()}
+                    className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
+                  >
+                    {vkLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+                    Завершить вход
+                  </button>
+                </div>
+              )}
             </div>
           ) : (
             <div className="space-y-2">

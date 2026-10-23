@@ -1,19 +1,30 @@
-//! VK ID OAuth 2.1 (Authorization Code + PKCE) via external browser and a
-//! local loopback server. Used instead of the in-app VK ID JS SDK, because the
-//! Tauri webview cannot open the SDK's popup ("Cannot create new tab").
+//! VK ID OAuth 2.1 (Authorization Code + PKCE) via the external browser.
+//!
+//! VK ID requires an HTTPS redirect URI (loopback http:// is rejected), so we
+//! redirect to the already-trusted `https://oauth.vk.com/blank.html`. The user
+//! copies the final address (which contains `?code=...&state=...&device_id=...`)
+//! back into the app, and we exchange the code for tokens.
 
-use std::io::{Read, Write};
-use std::time::{Duration, Instant};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
 const VK_ID_APP: &str = "54847796";
-const REDIRECT_URI: &str = "http://127.0.0.1:53682/vk/callback";
-const CALLBACK_PORT: u16 = 53682;
+const REDIRECT_URI: &str = "https://oauth.vk.com/blank.html";
 const SCOPES: &str = "wall,groups,photos";
-const TIMEOUT: Duration = Duration::from_secs(180);
+
+struct Pending {
+    verifier: String,
+    device_id: String,
+}
+
+fn pending() -> &'static Mutex<HashMap<String, Pending>> {
+    static PENDING: OnceLock<Mutex<HashMap<String, Pending>>> = OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 fn rand_b64(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
@@ -69,8 +80,8 @@ fn urldecode(s: &str) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
-fn parse_query(q: &str) -> std::collections::HashMap<String, String> {
-    let mut m = std::collections::HashMap::new();
+fn parse_query(q: &str) -> HashMap<String, String> {
+    let mut m = HashMap::new();
     for pair in q.split('&') {
         let mut it = pair.splitn(2, '=');
         if let (Some(k), Some(v)) = (it.next(), it.next()) {
@@ -97,9 +108,10 @@ fn open_browser(url: &str) {
     }
 }
 
-/// Full VK ID login: opens browser, waits for loopback callback, exchanges code.
-/// Returns (access_token, user_id).
-pub async fn login() -> Result<(String, Option<String>), String> {
+/// Start VK ID login: build the authorize URL (PKCE), remember verifier/state,
+/// and open it in the system browser. Returns the URL so the UI can also show it.
+#[tauri::command]
+pub fn vk_oauth_start() -> Result<serde_json::Value, String> {
     let verifier = rand_b64(32);
     let challenge = s256(&verifier);
     let state = rand_b64(16);
@@ -115,83 +127,64 @@ pub async fn login() -> Result<(String, Option<String>), String> {
         dev = device_id,
     );
 
-    let listener = std::net::TcpListener::bind(("127.0.0.1", CALLBACK_PORT))
-        .map_err(|e| format!("Не удалось занять порт {}: {}", CALLBACK_PORT, e))?;
-    let _ = listener.set_nonblocking(true);
+    pending()
+        .lock()
+        .map_err(|_| "Внутренняя ошибка состояния".to_string())?
+        .insert(state.clone(), Pending { verifier, device_id });
 
     open_browser(&auth_url);
 
-    let expected_state = state.clone();
-    let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
-    std::thread::spawn(move || {
-        let start = Instant::now();
-        loop {
-            if start.elapsed() > TIMEOUT {
-                let _ = tx.send(Err("Время ожидания входа истекло (3 минуты)".to_string()));
-                break;
-            }
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    let mut buf = [0u8; 8192];
-                    let n = stream.read(&mut buf).unwrap_or(0);
-                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
-                    let first = req.lines().next().unwrap_or("");
-                    let path = first.split_whitespace().nth(1).unwrap_or("");
-                    if path.starts_with("/vk/callback") {
-                        let query = path.splitn(2, '?').nth(1).unwrap_or("");
-                        let params = parse_query(query);
-                        let body = "<!doctype html><meta charset=\"utf-8\"><body style=\"font-family:sans-serif;padding:2rem\"><h3>Вход выполнен. Можете закрыть окно и вернуться в приложение.</h3></body>";
-                        let resp = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            body.len(),
-                            body
-                        );
-                        let _ = stream.write_all(resp.as_bytes());
-                        let _ = stream.flush();
+    Ok(serde_json::json!({ "authUrl": auth_url, "state": state }))
+}
 
-                        let got_state = params.get("state").cloned().unwrap_or_default();
-                        if got_state != expected_state {
-                            let _ = tx.send(Err("state не совпал (возможна CSRF-атака)".to_string()));
-                        } else if let Some(code) = params.get("code") {
-                            let _ = tx.send(Ok(code.clone()));
-                        } else if let Some(err) = params.get("error") {
-                            let desc = params.get("error_description").cloned().unwrap_or_default();
-                            let _ = tx.send(Err(format!("VK: {} {}", err, desc)));
-                        } else {
-                            let _ = tx.send(Err("VK не вернул code".to_string()));
-                        }
-                        break;
-                    } else {
-                        let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-                        let _ = stream.flush();
-                    }
-                }
-                Err(_) => std::thread::sleep(Duration::from_millis(150)),
-            }
-        }
-    });
+/// Complete VK ID login: parse `code`/`state`/`device_id` from the pasted
+/// redirect URL and exchange the code for an access token (PKCE).
+#[tauri::command]
+pub async fn vk_oauth_complete(redirect_url: String) -> Result<serde_json::Value, String> {
+    let trimmed = redirect_url.trim();
+    // Support both "?code=..." and "#code=..." forms; take everything after the first ? or #.
+    let query = trimmed
+        .split_once('?')
+        .map(|(_, q)| q)
+        .or_else(|| trimmed.split_once('#').map(|(_, q)| q))
+        .unwrap_or(trimmed);
+    let params = parse_query(query);
 
-    let code = tokio::task::spawn_blocking(move || rx.recv())
-        .await
-        .map_err(|_| "Ожидание callback прервано".to_string())?
-        .map_err(|_| "Ожидание callback прервано".to_string())??;
+    if let Some(err) = params.get("error") {
+        let desc = params.get("error_description").cloned().unwrap_or_default();
+        return Err(format!("VK ID: {} {}", err, desc));
+    }
+
+    let code = params.get("code").cloned().ok_or_else(|| {
+        "В вставленном URL нет параметра code. Скопируйте полный адрес страницы после входа."
+            .to_string()
+    })?;
+    let state = params.get("state").cloned().unwrap_or_default();
+
+    let p = pending()
+        .lock()
+        .map_err(|_| "Внутренняя ошибка состояния".to_string())?
+        .remove(&state)
+        .ok_or_else(|| "Сессия входа не найдена/устарела — начните вход заново".to_string())?;
+
+    let device_id = params.get("device_id").cloned().unwrap_or(p.device_id);
 
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(20))
         .build()
         .map_err(|_| "Не удалось инициализировать HTTP-клиент".to_string())?;
 
-    let params = [
+    let form = [
         ("grant_type", "authorization_code"),
         ("code", code.as_str()),
-        ("code_verifier", verifier.as_str()),
+        ("code_verifier", p.verifier.as_str()),
         ("client_id", VK_ID_APP),
         ("device_id", device_id.as_str()),
         ("redirect_uri", REDIRECT_URI),
     ];
     let resp = client
         .post("https://id.vk.com/oauth2/auth")
-        .form(&params)
+        .form(&form)
         .send()
         .await
         .map_err(|_| "Сетевая ошибка при обмене кода VK ID".to_string())?;
@@ -202,10 +195,7 @@ pub async fn login() -> Result<(String, Option<String>), String> {
         .map_err(|_| format!("Некорректный ответ VK ID (HTTP {})", status.as_u16()))?;
 
     if let Some(err) = json.get("error") {
-        let desc = json
-            .get("error_description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let desc = json.get("error_description").and_then(|v| v.as_str()).unwrap_or("");
         return Err(format!("VK ID token error: {} {}", err, desc));
     }
 
@@ -220,12 +210,5 @@ pub async fn login() -> Result<(String, Option<String>), String> {
         .map(|n| n.to_string())
         .or_else(|| json.get("user_id").and_then(|v| v.as_str()).map(|s| s.to_string()));
 
-    Ok((token, user_id))
-}
-
-/// Tauri Command: perform VK ID login (browser + loopback) and return token + user id.
-#[tauri::command]
-pub async fn vk_oauth_login() -> Result<serde_json::Value, String> {
-    let (token, user_id) = login().await?;
     Ok(serde_json::json!({ "accessToken": token, "userId": user_id }))
 }

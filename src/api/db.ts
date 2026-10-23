@@ -581,11 +581,22 @@ export interface VkCommunity {
 }
 
 /**
- * Perform VK ID login via external browser + local loopback (PKCE).
- * Returns the user access token and user id.
+ * Start VK ID login (opens browser). Returns the authorize URL and state.
  */
-export async function vkOauthLogin(): Promise<{ accessToken: string; userId?: string | null }> {
-  return await safeInvoke<{ accessToken: string; userId?: string | null }>('vk_oauth_login');
+export async function vkOauthStart(): Promise<{ authUrl: string; state: string }> {
+  return await safeInvoke<{ authUrl: string; state: string }>('vk_oauth_start');
+}
+
+/**
+ * Complete VK ID login by passing the redirect URL the browser landed on
+ * (contains ?code=...&state=...&device_id=...). Returns access token + user id.
+ */
+export async function vkOauthComplete(
+  redirectUrl: string
+): Promise<{ accessToken: string; userId?: string | null }> {
+  return await safeInvoke<{ accessToken: string; userId?: string | null }>('vk_oauth_complete', {
+    redirectUrl,
+  });
 }
 
 /**
