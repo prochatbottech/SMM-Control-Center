@@ -48,8 +48,8 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install
 
-      - name: Setup Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - name: Setup Rust (pinned 1.95.0)
+        uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: ${{ matrix.target }}
 
