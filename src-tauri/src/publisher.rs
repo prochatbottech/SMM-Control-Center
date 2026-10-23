@@ -314,6 +314,29 @@ impl RealPublisher {
         Self::parse_telegram_response(status, &body_json)
     }
 
+    /// Detect a VK community id for a community (group) access token.
+    /// `groups.getById` without `group_ids` returns the community that owns the token.
+    /// Returns None for user tokens (or if detection fails), meaning "post as the user".
+    async fn resolve_vk_group_id(&self, base_url: &str, token: &str) -> Option<i64> {
+        let url = format!("{}/method/groups.getById", base_url);
+        let params = [("access_token", token), ("v", "5.199")];
+        let resp = self.client.post(&url).form(&params).send().await.ok()?;
+        let json: serde_json::Value = resp.json().await.ok()?;
+        let response = json.get("response")?;
+
+        if let Some(arr) = response.as_array() {
+            return arr.first().and_then(|g| g.get("id")).and_then(|v| v.as_i64());
+        }
+        for key in ["groups", "items"] {
+            if let Some(arr) = response.get(key).and_then(|v| v.as_array()) {
+                if let Some(id) = arr.first().and_then(|g| g.get("id")).and_then(|v| v.as_i64()) {
+                    return Some(id);
+                }
+            }
+        }
+        response.get("id").and_then(|v| v.as_i64())
+    }
+
     /// Internal VKontakte publishing logic (text only or with photos)
     async fn publish_vk(
         &self,
@@ -326,9 +349,15 @@ impl RealPublisher {
             .as_deref()
             .unwrap_or("https://api.vk.com");
 
+        // Detect community (group) token. Community tokens must post with
+        // owner_id = -<group_id> and from_group = 1, otherwise VK returns
+        // error 27 "method is unavailable with group auth".
+        let group_id = self.resolve_vk_group_id(base_url, token).await;
+        let owner_id_neg = group_id.map(|g| format!("-{}", g));
+
         let mut attachments: Vec<String> = Vec::new();
         for path in media_urls {
-            let attachment = self.upload_vk_photo(base_url, token, path).await?;
+            let attachment = self.upload_vk_photo(base_url, token, path, group_id).await?;
             attachments.push(attachment);
         }
 
@@ -338,6 +367,11 @@ impl RealPublisher {
             ("v", "5.199"),
             ("message", content),
         ];
+
+        if let Some(ref owner_id) = owner_id_neg {
+            params.push(("owner_id", owner_id.as_str()));
+            params.push(("from_group", "1"));
+        }
 
         let attachments_joined = attachments.join(",");
         if !attachments_joined.is_empty() {
@@ -373,14 +407,19 @@ impl RealPublisher {
         base_url: &str,
         token: &str,
         path: &str,
+        group_id: Option<i64>,
     ) -> Result<String, String> {
         let bytes = read_media_bytes(path).await?;
         let file_name = media_file_name(path);
         let mime = mime_for_path(path);
+        let gid_str = group_id.map(|g| g.to_string());
 
         // 1. Obtain an upload URL for a wall photo
         let upload_server_url = format!("{}/method/photos.getWallUploadServer", base_url);
-        let params = [("access_token", token), ("v", "5.199")];
+        let mut params: Vec<(&str, &str)> = vec![("access_token", token), ("v", "5.199")];
+        if let Some(ref gid) = gid_str {
+            params.push(("group_id", gid.as_str()));
+        }
         let resp = match self.client.post(&upload_server_url).form(&params).send().await {
             Ok(r) => r,
             Err(_) => return Err("Network or API error occurred".to_string()),
@@ -446,13 +485,16 @@ impl RealPublisher {
 
         // 3. Save the uploaded photo to the wall album
         let save_url = format!("{}/method/photos.saveWallPhoto", base_url);
-        let save_params = [
+        let mut save_params: Vec<(&str, &str)> = vec![
             ("access_token", token),
             ("v", "5.199"),
             ("server", &server),
             ("photo", &photo),
             ("hash", &hash),
         ];
+        if let Some(ref gid) = gid_str {
+            save_params.push(("group_id", gid.as_str()));
+        }
         let save_resp = match self.client.post(&save_url).form(&save_params).send().await {
             Ok(r) => r,
             Err(_) => return Err("Network or API error occurred".to_string()),
