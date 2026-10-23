@@ -281,8 +281,8 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
           {platform === 'ok' ? (
             <div className="space-y-3">
               <p className="text-xs text-amber-700 dark:text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-lg p-2.5">
-                Для Одноклассников укажите данные REST API приложения и сессии. Все значения будут
-                зашифрованы AES-256.
+                Вход через OK пока <b>временный ручной</b> (нужны данные приложения/сессии). Готовится
+                полноценный OK-логин через OAuth (требуется application_id). Значения шифруются AES-256.
               </p>
               {[
                 { label: 'Access Token', value: okAccessToken, onChange: setOkAccessToken, placeholder: 'Токен доступа сессии' },

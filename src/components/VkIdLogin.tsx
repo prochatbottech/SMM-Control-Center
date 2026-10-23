@@ -14,12 +14,32 @@ interface VkIdLoginProps {
 // VK ID application id (VK ID app with OK/Mail.ru login enabled).
 const VK_ID_APP = 54847796;
 
+function describeError(e: any): string {
+  if (e == null) return 'неизвестная ошибка';
+  if (typeof e === 'string') return e;
+  const anyE = e as any;
+  const direct = anyE.error_description || anyE.message || anyE.error || anyE.reason;
+  if (direct && typeof direct === 'string') return direct;
+  try {
+    return JSON.stringify(e);
+  } catch {
+    return String(e);
+  }
+}
+
 export const VkIdLogin: React.FC<VkIdLoginProps> = ({ onSuccess, onError }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const renderedRef = useRef(false);
+  const [status, setStatus] = React.useState<string>('');
 
   useEffect(() => {
     let interval: ReturnType<typeof setInterval> | null = null;
+
+    const fail = (e: any) => {
+      const msg = describeError(e);
+      setStatus(`Ошибка VK ID: ${msg}`);
+      onError?.(msg);
+    };
 
     const tryRender = (): boolean => {
       const VKID = window.VKIDSDK;
@@ -32,7 +52,7 @@ export const VkIdLogin: React.FC<VkIdLoginProps> = ({ onSuccess, onError }) => {
           redirectUrl: 'https://oauth.vk.com/blank.html',
           responseMode: VKID.ConfigResponseMode.Callback,
           source: VKID.ConfigSource.LOWCODE,
-          scope: 'wall,groups,offline,photos',
+          scope: 'wall,groups,photos',
         });
 
         const oAuth = new VKID.OAuthList();
@@ -41,28 +61,27 @@ export const VkIdLogin: React.FC<VkIdLoginProps> = ({ onSuccess, onError }) => {
             container: containerRef.current,
             oauthList: ['vkid', 'ok_ru', 'mail_ru'],
           })
-          .on(VKID.WidgetEvents.ERROR, (e: any) => {
-            onError?.(String(e?.error ?? e?.error_description ?? e));
-          })
+          .on(VKID.WidgetEvents.ERROR, (e: any) => fail(e))
           .on(VKID.OAuthListInternalEvents.LOGIN_SUCCESS, async (payload: any) => {
             const { code, device_id } = payload ?? {};
             try {
               const data = await VKID.Auth.exchangeCode(code, device_id);
               const token = data?.access_token;
               if (!token) {
-                onError?.('VK ID не вернул access_token');
+                fail({ error_description: 'VK ID не вернул access_token', data });
                 return;
               }
+              setStatus('');
               onSuccess(String(token), data?.user_id != null ? String(data.user_id) : undefined);
             } catch (err: any) {
-              onError?.(String(err?.message ?? err));
+              fail(err);
             }
           });
 
         renderedRef.current = true;
         return true;
       } catch (err: any) {
-        onError?.(String(err?.message ?? err));
+        fail(err);
         return true;
       }
     };
@@ -75,6 +94,14 @@ export const VkIdLogin: React.FC<VkIdLoginProps> = ({ onSuccess, onError }) => {
           interval = null;
         }
       }, 300);
+      // Give up after ~12s if the SDK never loads.
+      setTimeout(() => {
+        if (!renderedRef.current) {
+          const m = 'SDK VK ID не загрузился (нет доступа к unpkg / заблокирован)';
+          setStatus(m);
+          onError?.(m);
+        }
+      }, 12000);
     }
 
     return () => {
@@ -88,6 +115,9 @@ export const VkIdLogin: React.FC<VkIdLoginProps> = ({ onSuccess, onError }) => {
         Войдите через VK / OK / Mail.ru, чтобы выбрать сообщество для публикации:
       </p>
       <div ref={containerRef} className="min-h-[48px]" />
+      {status && (
+        <p className="text-xs text-rose-600 dark:text-rose-400 break-words">{status}</p>
+      )}
     </div>
   );
 };
