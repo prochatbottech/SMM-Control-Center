@@ -1,8 +1,7 @@
 import React, { useState } from 'react';
 import { Eye, EyeOff, Loader2, ShieldCheck, Users } from 'lucide-react';
-import { Platform, VkCommunity, vkListCommunities, setAccountTarget } from '../api/db';
+import { Platform, VkCommunity, vkListCommunities, vkOauthLogin, setAccountTarget } from '../api/db';
 import { useCreateAccountMutation } from '../hooks/useAccounts';
-import { VkIdLogin } from './VkIdLogin';
 import { toast } from 'sonner';
 
 interface AddAccountFormProps {
@@ -61,6 +60,18 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
         toast.error(`Не удалось получить список сообществ: ${msg}`);
       })
       .finally(() => setVkLoading(false));
+  };
+
+  const handleVkLoginClick = async () => {
+    setVkLoading(true);
+    try {
+      const res = await vkOauthLogin();
+      handleVkLogin(res.accessToken, res.userId ?? undefined);
+    } catch (err: any) {
+      const msg = typeof err === 'string' ? err : err?.message || String(err);
+      toast.error(`VK вход: ${msg}`);
+      setVkLoading(false);
+    }
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -167,10 +178,25 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
       {isVk ? (
         <div className="space-y-3">
           {!vkToken ? (
-            <VkIdLogin
-              onSuccess={handleVkLogin}
-              onError={(m) => toast.error(`VK ID: ${m}`)}
-            />
+            <div className="space-y-2">
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                Нажмите «Войти через VK» — откроется браузер (вход через VK / OK / Mail.ru).
+                После входа вернитесь в приложение и выберите сообщество.
+              </p>
+              <button
+                type="button"
+                onClick={handleVkLoginClick}
+                disabled={vkLoading || isPending}
+                className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
+              >
+                {vkLoading ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <ShieldCheck className="w-4 h-4" />
+                )}
+                {vkLoading ? 'Ожидание входа в браузере…' : 'Войти через VK'}
+              </button>
+            </div>
           ) : (
             <div className="space-y-2">
               <div className="flex items-center justify-between">

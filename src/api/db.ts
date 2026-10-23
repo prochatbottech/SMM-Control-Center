@@ -581,6 +581,14 @@ export interface VkCommunity {
 }
 
 /**
+ * Perform VK ID login via external browser + local loopback (PKCE).
+ * Returns the user access token and user id.
+ */
+export async function vkOauthLogin(): Promise<{ accessToken: string; userId?: string | null }> {
+  return await safeInvoke<{ accessToken: string; userId?: string | null }>('vk_oauth_login');
+}
+
+/**
  * List VK communities the authorized user administers (requires `groups` scope).
  */
 export async function vkListCommunities(token: string): Promise<VkCommunity[]> {

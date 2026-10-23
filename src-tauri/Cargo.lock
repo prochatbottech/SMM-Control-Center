@@ -4659,7 +4659,7 @@ dependencies = [
 
 [[package]]
 name = "smm-control-center"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -4672,6 +4672,7 @@ dependencies = [
  "scraper",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tauri",
  "tauri-build",

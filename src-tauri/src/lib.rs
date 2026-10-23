@@ -14,6 +14,7 @@ pub mod parser;
 pub mod publisher;
 pub mod scheduler;
 pub mod worker_status;
+pub mod vk_oauth;
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -166,6 +167,7 @@ pub fn run() {
             commands::delete_account,
             commands::vk_list_communities,
             commands::set_account_target,
+            vk_oauth::vk_oauth_login,
             commands::create_post,
             commands::get_posts,
             commands::delete_post,
