@@ -581,6 +581,108 @@ pub async fn delete_audience_contact(
     id: String,
 ) -> Result<bool, String> {
     db::delete_audience_contact(&state.pool, &id).await
+}
+
+/// Send VK friend requests to stored contacts that are still in status "new".
+/// Runs slowly (human-like delays) and may take minutes for a batch.
+#[tauri::command]
+pub async fn send_friend_requests(
+    state: State<'_, DbState>,
+    account_id: String,
+    limit: Option<u32>,
+) -> Result<JsonValue, String> {
+    let account = db::get_account_by_id(&state.pool, &account_id)
+        .await?
+        .ok_or_else(|| format!("Account '{}' not found", account_id))?;
+
+    if account.auth_type.as_deref() != Some("browser") {
+        return Err("Заявки через браузер доступны только для браузерных аккаунтов".to_string());
+    }
+
+    let batch_limit = limit.unwrap_or(5).clamp(1, 15);
+    let contacts = db::get_audience_contacts(&state.pool, Some(&account_id)).await?;
+    let pending: Vec<models::AudienceContact> = contacts
+        .into_iter()
+        .filter(|c| c.status == "new")
+        .take(batch_limit as usize)
+        .collect();
+
+    if pending.is_empty() {
+        return Err("Нет новых контактов для отправки заявок".to_string());
+    }
+
+    let hrefs: Vec<String> = pending.iter().map(|c| c.profile_href.clone()).collect();
+    let platform = account.platform.clone();
+    let acc_id = account.id.clone();
+    let timeout = std::time::Duration::from_secs(hrefs.len() as u64 * 130 + 180);
+
+    let resp = tokio::task::spawn_blocking(move || {
+        crate::browser_worker::browser_action_with_timeout(
+            acc_id,
+            platform,
+            "friend_requests".to_string(),
+            Some(serde_json::json!({ "hrefs": hrefs })),
+            timeout,
+        )
+    })
+    .await
+    .map_err(|e| format!("Browser worker task failed: {}", e))??;
+
+    if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        return Err(resp
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("browser worker error")
+            .to_string());
+    }
+
+    let data = resp.get("data").cloned().unwrap_or(serde_json::json!({}));
+    if let Some(err) = data.get("error").and_then(|v| v.as_str()) {
+        return Err(err.to_string());
+    }
+
+    let results = data
+        .get("results")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut sent = 0usize;
+    let mut skipped = 0usize;
+
+    for result in &results {
+        let Some(href) = result.get("href").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let status = result
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("error");
+
+        let Some(contact) = pending.iter().find(|c| c.profile_href == href) else {
+            continue;
+        };
+
+        match status {
+            "sent" | "sent_unconfirmed" | "already_requested" => {
+                db::set_audience_contact_status(&state.pool, &contact.id, "friend_requested")
+                    .await?;
+                sent += 1;
+            }
+            "no_button" => {
+                db::set_audience_contact_status(&state.pool, &contact.id, "skipped").await?;
+                skipped += 1;
+            }
+            _ => {}
+        }
+    }
+
+    Ok(serde_json::json!({
+        "requested": sent,
+        "skipped": skipped,
+        "total": results.len(),
+        "details": results,
+    }))
 }/// Get a valid VK access token for an account (decrypt stored creds + refresh if
 /// expired). Persists refreshed creds back to the account.
 async fn vk_account_access(

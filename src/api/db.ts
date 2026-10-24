@@ -748,4 +748,18 @@ export async function deleteAudienceContact(id: string): Promise<boolean> {
   return await safeInvoke<boolean>('delete_audience_contact', { id });
 }
 
+/**
+ * Send friend requests to contacts in status "new". Runs slowly in the browser
+ * (human-like delays) — a batch may take several minutes.
+ */
+export async function sendFriendRequests(
+  accountId: string,
+  limit?: number
+): Promise<{ requested: number; skipped: number; total: number }> {
+  return await safeInvoke<{ requested: number; skipped: number; total: number }>(
+    'send_friend_requests',
+    { accountId, limit: limit ?? 5 }
+  );
+}
+
 

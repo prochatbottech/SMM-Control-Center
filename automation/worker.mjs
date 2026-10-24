@@ -110,6 +110,11 @@ async function cmdAction(req) {
       return { error: `parse_members not implemented for ${platform}` };
     }
 
+    if (action === 'friend_requests') {
+      if (platform === 'vk') return await sendVkFriendRequests(page, params);
+      return { error: `friend_requests not implemented for ${platform}` };
+    }
+
     if (action === 'post') {
       if (platform === 'vk') return await postVk(page, params);
       if (platform === 'ok') return await postOk(page, params);
@@ -350,6 +355,83 @@ async function parseVkMembers(page, params) {
   } catch (err) {
     return { error: `${String(err && err.message ? err.message : err)} @ ${page.url()}` };
   }
+}
+
+// Send friend requests from the given profile hrefs, slowly (one by one).
+async function sendVkFriendRequests(page, params) {
+  const hrefs = Array.isArray(params.hrefs) ? params.hrefs : [];
+  const minDelay = Math.max(Number(params.minDelayMs) || 45000, 15000);
+  const maxDelay = Math.max(Number(params.maxDelayMs) || 95000, minDelay + 5000);
+
+  if (hrefs.length === 0) return { error: 'no profile hrefs given' };
+
+  const results = [];
+
+  for (let i = 0; i < hrefs.length; i++) {
+    const href = hrefs[i];
+    try {
+      await page.goto(`https://m.vk.com${href}`, { waitUntil: 'load' }).catch(() => {});
+      await page.waitForTimeout(3500);
+
+      if (/login/i.test(page.url())) {
+        return { error: 'not logged in (session expired) — re-login in the browser', results };
+      }
+
+      await humanScroll(page, 1).catch(() => {});
+      await humanPause(800, 2200);
+
+      const bodyText = await page.evaluate(() =>
+        document.body.innerText.replace(/\s+/g, ' ')
+      );
+
+      if (/Заявка отправлена/.test(bodyText)) {
+        results.push({ href, status: 'already_requested' });
+        continue;
+      }
+
+      const labels = ['Добавить в друзья', 'Отправить заявку'];
+      let clicked = false;
+      for (const label of labels) {
+        const btn = page.getByText(label, { exact: true }).first();
+        if ((await btn.count()) > 0 && (await btn.isVisible().catch(() => false))) {
+          await humanPause(700, 1800);
+          await btn.click({ timeout: 15000 }).catch(() => {});
+          clicked = true;
+          break;
+        }
+      }
+
+      if (!clicked) {
+        results.push({ href, status: 'no_button' });
+        continue;
+      }
+
+      await humanPause(1500, 3200);
+      const afterText = await page.evaluate(() =>
+        document.body.innerText.replace(/\s+/g, ' ')
+      );
+      results.push({
+        href,
+        status: /Заявка отправлена/.test(afterText) ? 'sent' : 'sent_unconfirmed',
+      });
+    } catch (err) {
+      results.push({
+        href,
+        status: 'error',
+        message: String(err && err.message ? err.message : err),
+      });
+    }
+
+    if (i < hrefs.length - 1) {
+      await humanPause(minDelay, maxDelay);
+    }
+  }
+
+  return {
+    ok: true,
+    results,
+    sent: results.filter((r) => r.status === 'sent' || r.status === 'sent_unconfirmed').length,
+  };
 }
 
 // Community wall post on the desktop UI (verified flow):

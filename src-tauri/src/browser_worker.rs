@@ -175,6 +175,23 @@ pub fn browser_action(
     action: String,
     params: Option<Value>,
 ) -> Result<Value, String> {
+    browser_action_with_timeout(
+        account_id,
+        platform,
+        action,
+        params,
+        Duration::from_secs(360),
+    )
+}
+
+/// Same as `browser_action` but with a caller-provided timeout (long batch jobs).
+pub fn browser_action_with_timeout(
+    account_id: String,
+    platform: String,
+    action: String,
+    params: Option<Value>,
+    timeout: Duration,
+) -> Result<Value, String> {
     let req = json!({
         "cmd": "action",
         "accountId": account_id,
@@ -182,7 +199,7 @@ pub fn browser_action(
         "action": action,
         "params": params.unwrap_or(json!({})),
     });
-    run_worker(req, Duration::from_secs(360))
+    run_worker(req, timeout)
 }
 
 /// Publish a post through the browser (blocking). Used by the scheduler for

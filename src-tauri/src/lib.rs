@@ -181,6 +181,7 @@ pub fn run() {
             commands::list_audience,
             commands::set_audience_status,
             commands::delete_audience_contact,
+            commands::send_friend_requests,
             commands::create_post,
             commands::get_posts,
             commands::delete_post,

@@ -7,8 +7,10 @@ import {
   deleteAudienceContact,
   listAudience,
   parseAudience,
+  sendFriendRequests,
 } from '../api/db';
 import { useAccountsQuery } from '../hooks/useAccounts';
+import { ConfirmDialog } from './ConfirmDialog';
 
 const AUDIENCE_QUERY_KEY = ['audience'] as const;
 
@@ -36,6 +38,9 @@ export function AudienceView() {
   const [query, setQuery] = useState('');
   const [limit, setLimit] = useState(50);
   const [isParsing, setIsParsing] = useState(false);
+  const [isSending, setIsSending] = useState(false);
+  const [friendLimit, setFriendLimit] = useState(5);
+  const [confirmFriends, setConfirmFriends] = useState(false);
 
   const browserAccounts = useMemo(
     () => (accounts ?? []).filter((a) => a.auth_type === 'browser'),
@@ -81,6 +86,23 @@ export function AudienceView() {
       toast.error(`Ошибка парсинга: ${msg}`);
     } finally {
       setIsParsing(false);
+    }
+  };
+
+  const handleSendFriends = async () => {
+    setConfirmFriends(false);
+    setIsSending(true);
+    try {
+      const res = await sendFriendRequests(effectiveAccountId, friendLimit);
+      await queryClient.invalidateQueries({ queryKey: AUDIENCE_QUERY_KEY });
+      toast.success(
+        `Заявок отправлено: ${res.requested}, пропущено: ${res.skipped} (из ${res.total})`
+      );
+    } catch (err: any) {
+      const msg = typeof err === 'string' ? err : err?.message || String(err);
+      toast.error(`Ошибка отправки заявок: ${msg}`);
+    } finally {
+      setIsSending(false);
     }
   };
 
@@ -199,6 +221,59 @@ export function AudienceView() {
           сообществ скрыты.
         </div>
       </div>
+
+      <div className="p-4 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl flex items-center justify-between gap-4 flex-wrap">
+        <div className="text-sm text-zinc-600 dark:text-zinc-300">
+          <div className="font-medium text-zinc-800 dark:text-zinc-100">
+            Заявки в друзья
+          </div>
+          <div className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+            По одной, с паузами 45–95 секунд. Новых контактов: {stats.fresh}
+          </div>
+        </div>
+
+        <div className="flex items-end gap-2">
+          <div>
+            <label className="block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1">
+              Сколько
+            </label>
+            <input
+              type="number"
+              min={1}
+              max={15}
+              value={friendLimit}
+              onChange={(e) => setFriendLimit(Number(e.target.value))}
+              className="w-20 px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg"
+            />
+          </div>
+          <button
+            onClick={() => setConfirmFriends(true)}
+            disabled={isSending || stats.fresh === 0 || !effectiveAccountId}
+            className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition-colors disabled:opacity-50"
+          >
+            {isSending ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                Отправляю...
+              </>
+            ) : (
+              <>
+                <UserPlus className="w-4 h-4" />
+                Отправить заявки
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+
+      <ConfirmDialog
+        open={confirmFriends}
+        title="Отправить заявки в друзья?"
+        description={`Будет отправлено до ${friendLimit} заявок с паузами 45–95 секунд (несколько минут). Массовые заявки могут привести к ограничению аккаунта VK.`}
+        isPending={isSending}
+        onConfirm={handleSendFriends}
+        onCancel={() => setConfirmFriends(false)}
+      />
 
       <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl overflow-hidden">
         {isLoading ? (
