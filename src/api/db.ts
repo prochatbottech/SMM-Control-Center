@@ -662,4 +662,23 @@ export async function vkChangeCommunity(
   });
 }
 
+// ============================================================================
+// Browser automation (Playwright) for VK / OK
+// ============================================================================
+
+export async function browserLoginStart(
+  accountId: string,
+  platform: string
+): Promise<{ accountId: string }> {
+  return await safeInvoke<{ accountId: string }>('browser_login_start', { accountId, platform });
+}
+
+export async function browserLoginStatus(
+  accountId: string
+): Promise<{ status: string; error?: string }> {
+  return await safeInvoke<{ status: string; error?: string }>('browser_login_status', {
+    accountId,
+  });
+}
+
 

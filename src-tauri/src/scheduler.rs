@@ -165,18 +165,34 @@ pub async fn process_due_posts<P: PostPublisher>(
                 &format!("Отправка поста '{}' в {} ('{}')...", post.id, account.platform.to_uppercase(), account.name),
             );
 
-            // Publish via connector
-            let publish_result = publisher
-                .publish(
-                    &account.platform,
-                    &account.name,
-                    &plain_token,
-                    &post.content,
-                    &post.media_urls,
-                    &post.format,
-                    account.target_id.as_deref(),
-                )
-                .await;
+            // Publish via connector or browser automation
+            let is_browser = account.auth_type.as_deref() == Some("browser");
+            let publish_result = if is_browser
+                && (account.platform.eq_ignore_ascii_case("vk")
+                    || account.platform.eq_ignore_ascii_case("ok"))
+            {
+                let acc_id = account.id.clone();
+                let platform = account.platform.clone();
+                let content = post.content.clone();
+                let media = post.media_urls.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::browser_worker::post(&acc_id, &platform, &content, &media)
+                })
+                .await
+                .map_err(|e| format!("Browser worker task failed: {}", e))?
+            } else {
+                publisher
+                    .publish(
+                        &account.platform,
+                        &account.name,
+                        &plain_token,
+                        &post.content,
+                        &post.media_urls,
+                        &post.format,
+                        account.target_id.as_deref(),
+                    )
+                    .await
+            };
 
             // Invariant: Secret Redaction 2.0 & Log limit (max 500 characters)
             match publish_result {

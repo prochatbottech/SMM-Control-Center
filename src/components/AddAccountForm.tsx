@@ -1,6 +1,17 @@
 import React, { useState } from 'react';
 import { Eye, EyeOff, Loader2, ShieldCheck, Users } from 'lucide-react';
-import { Platform, VkCommunity, vkListCommunities, vkResolveTarget, vkOauthStart, vkOauthComplete, setAccountTarget } from '../api/db';
+import {
+  Platform,
+  VkCommunity,
+  vkListCommunities,
+  vkResolveTarget,
+  vkOauthStart,
+  vkOauthComplete,
+  setAccountTarget,
+  createAccount,
+  browserLoginStart,
+  browserLoginStatus,
+} from '../api/db';
 import { useCreateAccountMutation } from '../hooks/useAccounts';
 import { toast } from 'sonner';
 
@@ -32,6 +43,7 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
   const [vkQuery, setVkQuery] = useState('');
   const [vkCreds, setVkCreds] = useState('');
   const [vkManualToken, setVkManualToken] = useState('');
+  const [browserLoginPending, setBrowserLoginPending] = useState(false);
 
   const createMutation = useCreateAccountMutation();
 
@@ -125,6 +137,46 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
       toast.error(`Не удалось определить сообщество: ${msg}`);
     } finally {
       setVkLoading(false);
+    }
+  };
+
+  const handleBrowserLogin = async () => {
+    if (platform !== 'vk' && platform !== 'ok') return;
+    setBrowserLoginPending(true);
+    try {
+      const created = await createAccount({
+        platform,
+        name: `${platform === 'vk' ? 'VK' : 'OK'} (браузер)`,
+        token: '',
+      });
+      await browserLoginStart(created.id, platform);
+
+      const deadline = Date.now() + 5 * 60 * 1000;
+      let ok = false;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2000));
+        const st = await browserLoginStatus(created.id);
+        if (st.status === 'success') {
+          ok = true;
+          break;
+        }
+        if (st.status === 'error') {
+          toast.error(`Вход не завершён: ${st.error ?? 'ошибка'}`);
+          break;
+        }
+      }
+
+      if (ok) {
+        await setAccountTarget(created.id, { authType: 'browser', targetId: '', targetTitle: '' });
+        toast.success('Вход выполнен, сессия сохранена');
+        resetAll();
+        onSuccess?.();
+      }
+    } catch (err: any) {
+      const msg = typeof err === 'string' ? err : err?.message || String(err);
+      toast.error(`Ошибка: ${msg}`);
+    } finally {
+      setBrowserLoginPending(false);
     }
   };
 
@@ -228,6 +280,24 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
           <option value="instagram">Instagram</option>
         </select>
       </div>
+
+      {(platform === 'vk' || platform === 'ok') && (
+        <button
+          type="button"
+          onClick={handleBrowserLogin}
+          disabled={browserLoginPending || isPending}
+          className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
+        >
+          {browserLoginPending ? (
+            <Loader2 className="w-4 h-4 animate-spin" />
+          ) : (
+            <ShieldCheck className="w-4 h-4" />
+          )}
+          {browserLoginPending
+            ? 'Откройте браузер и войдите…'
+            : 'Войти через браузер (рекомендуется)'}
+        </button>
+      )}
 
       {isVk ? (
         <div className="space-y-3">
