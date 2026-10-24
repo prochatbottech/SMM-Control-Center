@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { Eye, EyeOff, Loader2, ShieldCheck, Users } from 'lucide-react';
 import {
   Platform,
@@ -12,7 +13,7 @@ import {
   browserLoginStart,
   browserLoginStatus,
 } from '../api/db';
-import { useCreateAccountMutation } from '../hooks/useAccounts';
+import { useCreateAccountMutation, ACCOUNTS_QUERY_KEY } from '../hooks/useAccounts';
 import { toast } from 'sonner';
 
 interface AddAccountFormProps {
@@ -46,6 +47,7 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
   const [browserLoginPending, setBrowserLoginPending] = useState(false);
 
   const createMutation = useCreateAccountMutation();
+  const queryClient = useQueryClient();
 
   const resetAll = () => {
     setToken('');
@@ -168,6 +170,7 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
 
       if (ok) {
         await setAccountTarget(created.id, { authType: 'browser', targetId: '', targetTitle: '' });
+        await queryClient.invalidateQueries({ queryKey: ACCOUNTS_QUERY_KEY });
         toast.success('Вход выполнен, сессия сохранена');
         resetAll();
         onSuccess?.();

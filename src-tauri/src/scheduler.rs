@@ -212,8 +212,13 @@ pub async fn process_due_posts<P: PostPublisher>(
                     .await?;
                 }
                 Err(raw_error) => {
-                    // Replace plain token if accidentally present
-                    let sanitized = raw_error.replace(&plain_token, "[REDACTED]");
+                    // Replace plain token if accidentally present (skip empty token,
+                    // otherwise replace("", ...) inserts the marker between every char).
+                    let sanitized = if plain_token.is_empty() {
+                        raw_error
+                    } else {
+                        raw_error.replace(&plain_token, "[REDACTED]")
+                    };
                     // Truncate to at most 500 characters safely
                     let final_log: String = sanitized.chars().take(500).collect();
                     logger::emit_log_opt(

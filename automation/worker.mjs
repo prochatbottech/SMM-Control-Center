@@ -85,7 +85,10 @@ async function cmdAction(req) {
   if (!cfg) return { error: `unknown platform: ${platform}` };
 
   const userDataDir = join(PROFILES_DIR, accountId);
-  const ctx = await chromium.launchPersistentContext(userDataDir, { headless: true });
+  const ctx = await chromium.launchPersistentContext(userDataDir, {
+    headless: false,
+    args: ['--window-position=-2400,-2400', '--window-size=1280,900'],
+  });
   const page = ctx.pages()[0] || (await ctx.newPage());
 
   try {
@@ -108,55 +111,37 @@ async function cmdAction(req) {
   }
 }
 
-// Best-effort VK wall/community post. Selectors may need tuning against live DOM.
+// VK post via the mobile web composer (verified flow):
+// feed → «Создать пост» → span[contenteditable] → «Далее» → «Опубликовать».
 async function postVk(page, params) {
-  const { content = '', mediaPaths = [], targetUrl } = params;
-  const start = targetUrl || 'https://vk.com/feed';
-  await page.goto(start, { waitUntil: 'domcontentloaded' });
-  await humanPause(1500, 3500);
+  const { content = '', mediaPaths = [] } = params;
+  await page.goto('https://m.vk.com/feed', { waitUntil: 'domcontentloaded' });
+  await humanPause(1500, 3000);
 
-  // Focus the composer. Try several selectors; report what matched.
-  const composerSelectors = [
-    '#post_field',
-    'div[role="textbox"][contenteditable="true"]',
-    'textarea[placeholder*="Что у Вас нового"]',
-  ];
-  let composer = null;
-  for (const sel of composerSelectors) {
-    const loc = page.locator(sel).first();
-    if ((await loc.count()) > 0 && (await loc.isVisible().catch(() => false))) {
-      composer = sel;
-      break;
-    }
-  }
-  if (!composer) {
-    return { error: 'composer not found', url: page.url() };
-  }
+  await page.getByText('Создать пост', { exact: false }).first().click({ timeout: 20000 });
+  await page.waitForTimeout(800);
+  const composer = page.locator('span[contenteditable="true"][role="textbox"]').first();
+  await composer.waitFor({ state: 'visible', timeout: 20000 });
 
-  await humanClick(page, composer);
+  await composer.click();
+  await humanPause(500, 1200);
   await humanType(page, content);
   await humanPause();
 
-  for (const p of mediaPaths) {
-    await page.setInputFiles('input[type="file"]', p).catch(() => {});
-    await humanPause(1500, 3500);
-  }
-
-  const publishSelectors = [
-    'button:has-text("Опубликовать")',
-    'button[type="submit"]:has-text("Опубликовать")',
-    '#send_post',
-  ];
-  for (const sel of publishSelectors) {
-    const btn = page.locator(sel).first();
-    if ((await btn.count()) > 0 && (await btn.isVisible().catch(() => false))) {
-      await humanClick(page, sel);
+  if (mediaPaths.length > 0) {
+    for (const p of mediaPaths) {
+      await page.locator('input[type="file"]').first().setInputFiles(p).catch(() => {});
       await humanPause(1500, 3000);
-      return { ok: true, url: page.url() };
     }
   }
 
-  return { error: 'publish button not found', url: page.url() };
+  await page.getByText('Далее', { exact: true }).first().click({ timeout: 20000 });
+  await humanPause(1500, 3000);
+
+  await page.getByText('Опубликовать', { exact: true }).first().click({ timeout: 20000 });
+  await humanPause(2000, 4000);
+
+  return { ok: true, url: page.url() };
 }
 
 // Best-effort OK status/group post.
