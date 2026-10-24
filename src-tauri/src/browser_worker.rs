@@ -192,13 +192,18 @@ pub fn post(
     platform: &str,
     content: &str,
     media_paths: &[String],
+    target_id: Option<&str>,
 ) -> Result<String, String> {
     let req = json!({
         "cmd": "action",
         "accountId": account_id,
         "platform": platform,
         "action": "post",
-        "params": { "content": content, "mediaPaths": media_paths },
+        "params": {
+            "content": content,
+            "mediaPaths": media_paths,
+            "targetId": target_id.unwrap_or(""),
+        },
     });
 
     let resp = run_worker(req, Duration::from_secs(360))?;

@@ -88,6 +88,7 @@ async function cmdAction(req) {
   const ctx = await chromium.launchPersistentContext(userDataDir, {
     headless: false,
     args: ['--window-position=-2400,-2400', '--window-size=1280,900'],
+    viewport: { width: 1280, height: 900 },
   });
   const page = ctx.pages()[0] || (await ctx.newPage());
 
@@ -97,6 +98,11 @@ async function cmdAction(req) {
       const url = page.url();
       const loggedIn = await cfg.loggedIn(page, ctx).catch(() => false);
       return { url, loggedIn };
+    }
+
+    if (action === 'resolve_target') {
+      if (platform === 'vk') return await resolveVkTarget(page, params.query || '');
+      return { error: `resolve_target not implemented for ${platform}` };
     }
 
     if (action === 'post') {
@@ -114,6 +120,9 @@ async function cmdAction(req) {
 // VK post via the mobile web composer (verified flow):
 // m.vk.com/new_post → span[contenteditable] → «Далее» → «Опубликовать».
 async function postVk(page, params) {
+  const target = String(params.targetId || '').trim();
+  if (target) return await postVkCommunity(page, params, target);
+
   const { content = '', mediaPaths = [] } = params;
   try {
     await page.goto('https://m.vk.com/new_post', { waitUntil: 'load' }).catch(() => {});
@@ -153,6 +162,115 @@ async function postVk(page, params) {
     return { ok: true, url: page.url() };
   } catch (err) {
     return { error: `${String(err && err.message ? err.message : err)} @ ${page.url()}` };
+  }
+}
+
+// Normalize a community reference: URL / @name / name / id -> bare token.
+function vkNormalize(target) {
+  return String(target || '')
+    .trim()
+    .replace(/^https?:\/\//i, '')
+    .replace(/^(www\.)?(m\.)?vk\.(com|ru)\//i, '')
+    .replace(/^@/, '')
+    .replace(/[?#].*$/, '')
+    .replace(/\/+$/, '');
+}
+
+// Resolve a community to "-<gid>" plus its title, in the browser (no API token).
+async function resolveVkTarget(page, query) {
+  const q = vkNormalize(query);
+  if (!q) return { error: 'empty community reference' };
+
+  if (/^-?\d+$/.test(q)) {
+    const gid = q.replace(/^-/, '');
+    return { targetId: `-${gid}`, targetTitle: `Сообщество ${gid}` };
+  }
+
+  await page.goto(`https://vk.com/${encodeURIComponent(q)}`, { waitUntil: 'load' }).catch(() => {});
+  await page.waitForTimeout(4500);
+
+  if (/login/i.test(page.url())) {
+    return { error: 'not logged in (session expired) — re-login in the browser', url: page.url() };
+  }
+
+  const html = await page.content().catch(() => '');
+  const mostFrequent = (ids) => {
+    const freq = {};
+    for (const id of ids) freq[id] = (freq[id] || 0) + 1;
+    return Object.entries(freq).sort((a, b) => b[1] - a[1])[0]?.[0] || '';
+  };
+  const groupKeys = Array.from(html.matchAll(/"(?:group_?id|gid)":\s*"?(\d+)"?/g), (m) => m[1]);
+  const wallIds = Array.from(html.matchAll(/wall-(\d+)_?\d*/g), (m) => m[1]);
+  const gid = mostFrequent(groupKeys) || mostFrequent(wallIds);
+  if (!gid) return { error: `community not found: ${q}`, url: page.url() };
+
+  const rawTitle = await page
+    .evaluate(() => {
+      const og = document.querySelector('meta[property="og:title"]');
+      if (og && og.getAttribute('content')) return og.getAttribute('content');
+      return document.title || '';
+    })
+    .catch(() => '');
+
+  const title = String(rawTitle)
+    .replace(/\s*[|—]\s*ВКонтакте\s*$/i, '')
+    .replace(/:\s*записи сообщества\s*$/i, '')
+    .trim();
+
+  return { targetId: `-${gid}`, targetTitle: title || `Сообщество ${gid}`, screenName: q };
+}
+
+// Community wall post on the desktop UI (verified flow):
+// vk.com/wall-<gid> → «Создать пост» → composer → «Далее» → «Опубликовать».
+async function postVkCommunity(page, params, target) {
+  const { content = '', mediaPaths = [] } = params;
+  const gid = vkNormalize(target).replace(/^-/, '');
+  try {
+    await page.goto(`https://vk.com/wall-${gid}`, { waitUntil: 'load' }).catch(() => {});
+    await page.waitForTimeout(4500);
+
+    if (/login/i.test(page.url())) {
+      return { error: 'not logged in (session expired) — re-login in the browser', url: page.url() };
+    }
+
+    await humanScroll(page, 1).catch(() => {});
+
+    const createBtn = page.getByText('Создать пост', { exact: true }).first();
+    await createBtn.waitFor({ state: 'visible', timeout: 25000 });
+    await page.waitForTimeout(800);
+    await createBtn.click({ timeout: 20000 });
+
+    const composer = page.locator('span[contenteditable="true"][role="textbox"]').first();
+    await composer.waitFor({ state: 'visible', timeout: 30000 });
+    await page.waitForTimeout(700);
+    await composer.click();
+    await humanPause(500, 1200);
+    await humanType(page, content);
+    await humanPause();
+
+    if (mediaPaths.length > 0) {
+      for (const p of mediaPaths) {
+        await page.locator('input[type="file"]').first().setInputFiles(p).catch(() => {});
+        await humanPause(1500, 3000);
+      }
+    }
+
+    const nextBtn = page.getByText('Далее', { exact: true }).first();
+    await nextBtn.waitFor({ state: 'visible', timeout: 20000 });
+    await nextBtn.click({ timeout: 20000 });
+    await humanPause(1500, 3000);
+
+    const publishBtn = page.getByText('Опубликовать', { exact: true }).first();
+    await publishBtn.waitFor({ state: 'visible', timeout: 20000 });
+    await publishBtn.click({ timeout: 20000 });
+    await humanPause(2500, 4500);
+
+    return { ok: true, url: page.url(), target: `-${gid}` };
+  } catch (err) {
+    return {
+      error: `${String(err && err.message ? err.message : err)} @ ${page.url()}`,
+      target: `-${gid}`,
+    };
   }
 }
 

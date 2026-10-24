@@ -12,7 +12,7 @@ import {
   Plus,
   RefreshCw,
 } from 'lucide-react';
-import { Account, vkAddCommunity, vkChangeCommunity } from '../api/db';
+import { Account, vkAddCommunity, vkChangeCommunity, browserResolveTarget, setAccountTarget } from '../api/db';
 import { useDeleteAccountMutation, ACCOUNTS_QUERY_KEY } from '../hooks/useAccounts';
 import { ConfirmDialog } from './ConfirmDialog';
 import { PromptDialog } from './PromptDialog';
@@ -28,12 +28,21 @@ export const AccountCard: React.FC<AccountCardProps> = ({ account }) => {
   const queryClient = useQueryClient();
   const [promptMode, setPromptMode] = React.useState<'add' | 'change' | null>(null);
   const [promptPending, setPromptPending] = React.useState(false);
+  const isBrowser = account.auth_type === 'browser';
 
   const handlePromptConfirm = async (value: string) => {
     if (!promptMode) return;
     setPromptPending(true);
     try {
-      if (promptMode === 'add') {
+      if (isBrowser) {
+        const resolved = await browserResolveTarget(account.id, account.platform, value);
+        await setAccountTarget(account.id, {
+          authType: 'browser',
+          targetId: resolved.targetId,
+          targetTitle: resolved.targetTitle,
+        });
+        toast.success(`Сообщество: ${resolved.targetTitle}`);
+      } else if (promptMode === 'add') {
         const created = await vkAddCommunity(account.id, value);
         toast.success(`Добавлено сообщество: ${created.name}`);
       } else {
@@ -42,6 +51,20 @@ export const AccountCard: React.FC<AccountCardProps> = ({ account }) => {
       }
       await queryClient.invalidateQueries({ queryKey: ACCOUNTS_QUERY_KEY });
       setPromptMode(null);
+    } catch (err: any) {
+      const msg = typeof err === 'string' ? err : err?.message || String(err);
+      toast.error(`Ошибка: ${msg}`);
+    } finally {
+      setPromptPending(false);
+    }
+  };
+
+  const handleResetTarget = async () => {
+    setPromptPending(true);
+    try {
+      await setAccountTarget(account.id, { authType: 'browser', targetId: '', targetTitle: '' });
+      await queryClient.invalidateQueries({ queryKey: ACCOUNTS_QUERY_KEY });
+      toast.success('Публикация на личную стену');
     } catch (err: any) {
       const msg = typeof err === 'string' ? err : err?.message || String(err);
       toast.error(`Ошибка: ${msg}`);
@@ -148,11 +171,13 @@ export const AccountCard: React.FC<AccountCardProps> = ({ account }) => {
           <div className="flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400 mb-1">
             <span className="flex items-center gap-1 font-medium">
               <Lock className="w-3 h-3 text-emerald-500" />
-              Токен защищен (AES-256)
+              {isBrowser ? 'Сессия браузера (cookies)' : 'Токен защищен (AES-256)'}
             </span>
           </div>
           <p className="font-mono text-xs text-zinc-700 dark:text-zinc-300 truncate">
-            {account.masked_token || `${account.platform}_***encrypted`}
+            {isBrowser
+              ? 'профиль сохранён'
+              : account.masked_token || `${account.platform}_***encrypted`}
           </p>
         </div>
 
@@ -166,22 +191,48 @@ export const AccountCard: React.FC<AccountCardProps> = ({ account }) => {
               </span>
             </div>
             <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={() => setPromptMode('add')}
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 rounded-lg transition-colors"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                Добавить сообщество
-              </button>
-              <button
-                type="button"
-                onClick={() => setPromptMode('change')}
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-zinc-600 dark:text-zinc-300 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 border border-zinc-200 dark:border-zinc-700 rounded-lg transition-colors"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                Сменить сообщество
-              </button>
+              {isBrowser ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setPromptMode('add')}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 rounded-lg transition-colors"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    Указать сообщество
+                  </button>
+                  {account.target_title ? (
+                    <button
+                      type="button"
+                      onClick={handleResetTarget}
+                      disabled={promptPending}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-zinc-600 dark:text-zinc-300 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 border border-zinc-200 dark:border-zinc-700 rounded-lg transition-colors disabled:opacity-50"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      Личная стена
+                    </button>
+                  ) : null}
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setPromptMode('add')}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 rounded-lg transition-colors"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    Добавить сообщество
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPromptMode('change')}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-zinc-600 dark:text-zinc-300 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 border border-zinc-200 dark:border-zinc-700 rounded-lg transition-colors"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    Сменить сообщество
+                  </button>
+                </>
+              )}
             </div>
           </div>
         )}

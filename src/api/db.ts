@@ -681,4 +681,30 @@ export async function browserLoginStatus(
   });
 }
 
+/**
+ * Resolve a community in the browser (accounts with auth_type="browser" have no
+ * API token). Returns "-<gid>" plus the community title.
+ */
+export async function browserResolveTarget(
+  accountId: string,
+  platform: string,
+  query: string
+): Promise<{ targetId: string; targetTitle: string }> {
+  const res = await safeInvoke<{
+    targetId?: string;
+    targetTitle?: string;
+    error?: string;
+  }>('browser_action', {
+    accountId,
+    platform,
+    action: 'resolve_target',
+    params: { query },
+  });
+
+  if (res?.error) throw new Error(res.error);
+  if (!res?.targetId) throw new Error('Не удалось определить сообщество');
+
+  return { targetId: res.targetId, targetTitle: res.targetTitle || res.targetId };
+}
+
 

@@ -175,8 +175,15 @@ pub async fn process_due_posts<P: PostPublisher>(
                 let platform = account.platform.clone();
                 let content = post.content.clone();
                 let media = post.media_urls.clone();
+                let target = account.target_id.clone().unwrap_or_default();
                 tokio::task::spawn_blocking(move || {
-                    crate::browser_worker::post(&acc_id, &platform, &content, &media)
+                    crate::browser_worker::post(
+                        &acc_id,
+                        &platform,
+                        &content,
+                        &media,
+                        Some(target.as_str()),
+                    )
                 })
                 .await
                 .map_err(|e| format!("Browser worker task failed: {}", e))?
