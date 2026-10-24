@@ -21,25 +21,48 @@ function sleep(ms) {
 }
 
 function platformConfig(platform) {
+  const visibleText = async (page) =>
+    page
+      .evaluate(() => document.body.innerText.replace(/\s+/g, ' ').slice(0, 1200))
+      .catch(() => '');
+
   const cfg = {
     vk: {
       url: 'https://vk.com/',
       async loggedIn(page, ctx) {
+        if (/login/i.test(page.url())) return false;
+
+        const cookies = await ctx.cookies();
+        const hasAuth = cookies.some((c) => c.name === 'remixsid' && c.value);
+        if (!hasAuth) return false;
+
+        const txt = await visibleText(page);
+        // Guest pages show login/registration prompts.
+        if (/Войти|Зарегистрироваться/.test(txt)) return false;
+
         if (/(^|\/)(feed|al_feed)(\?|$)/.test(page.url()) || /vk\.com\/id\d+/.test(page.url())) {
           return true;
         }
-        const cookies = await ctx.cookies();
-        return cookies.some((c) => c.name === 'remixsid' && c.value);
+        return true;
       },
     },
     ok: {
       url: 'https://ok.ru/',
       async loggedIn(page, ctx) {
-        if (/ok\.ru\/(feed|notifications)(\?|$)/.test(page.url())) {
-          return true;
-        }
+        if (/\/feed|st\.cmd=userMain|my\.ok\.ru/i.test(page.url())) return true;
+
         const cookies = await ctx.cookies();
-        return cookies.some((c) => c.name === 'remixsid' && c.value);
+        // OK keeps the real session token in AUTHCODE; `remixsid` exists for guests too.
+        const hasAuthCode = cookies.some((c) => c.name === 'AUTHCODE' && c.value);
+
+        const txt = await visibleText(page);
+        const guestMarkers =
+          /Зарегистрироваться|Войти по QR-коду|Телефон или почта|Не получается войти/i.test(txt);
+        if (guestMarkers) return false;
+
+        if (hasAuthCode) return true;
+        // Fallback: authenticated UI markers.
+        return /Что у вас нового|Мои друзья|Сообщения/i.test(txt);
       },
     },
   };

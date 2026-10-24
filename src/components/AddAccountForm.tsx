@@ -10,6 +10,7 @@ import {
   vkOauthComplete,
   setAccountTarget,
   createAccount,
+  deleteAccount,
   browserLoginStart,
   browserLoginStatus,
 } from '../api/db';
@@ -174,6 +175,15 @@ export const AddAccountForm: React.FC<AddAccountFormProps> = ({ onSuccess, onCan
         toast.success('Вход выполнен, сессия сохранена');
         resetAll();
         onSuccess?.();
+      } else {
+        // Login did not complete — do not keep a half-created account.
+        try {
+          await deleteAccount(created.id);
+        } catch {
+          // ignore cleanup errors
+        }
+        await queryClient.invalidateQueries({ queryKey: ACCOUNTS_QUERY_KEY });
+        toast.error('Вход не выполнен — аккаунт не добавлен');
       }
     } catch (err: any) {
       const msg = typeof err === 'string' ? err : err?.message || String(err);
