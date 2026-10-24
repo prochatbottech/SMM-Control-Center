@@ -1,30 +1,21 @@
-//! Manages the Playwright browser-automation worker (Node) as a child process
-//! and exposes Tauri commands for login and actions for VK / OK.
+//! Runs the Playwright browser-automation worker (Node) as a short-lived child
+//! process per request. This keeps `automation/worker.mjs` changes effective
+//! without restarting the app and avoids a stuck long-lived worker.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use serde_json::{json, Value};
 use tauri::Manager;
 
-struct Worker {
-    stdin: Mutex<ChildStdin>,
-    pending: Arc<Mutex<HashMap<u64, Sender<Value>>>>,
-    next_id: AtomicU64,
-    _child: Child,
-}
-
-static WORKER: OnceLock<Option<Worker>> = OnceLock::new();
 static PROFILES_DIR: OnceLock<String> = OnceLock::new();
 static LOGIN_STATUS: OnceLock<Mutex<HashMap<String, Value>>> = OnceLock::new();
 
-/// Locate `automation/worker.mjs` robustly: env override, cwd upward, exe upward.
+/// Locate `automation/worker.mjs`: env override, cwd upward, exe upward.
 fn worker_script() -> String {
     if let Ok(p) = std::env::var("BROWSER_WORKER_SCRIPT") {
         if !p.is_empty() {
@@ -59,89 +50,57 @@ fn worker_script() -> String {
     rel.to_string_lossy().to_string()
 }
 
-fn spawn_worker() -> Result<Worker, String> {
-    let profiles_dir = PROFILES_DIR
+/// Spawn the worker for a single request, feed it one JSON line, and return the
+/// matching response. The process exits after processing (stdin closed).
+fn run_worker(req: Value, timeout: Duration) -> Result<Value, String> {
+    let script = worker_script();
+    let profiles = PROFILES_DIR
         .get()
         .cloned()
         .unwrap_or_else(|| "browser_profiles".to_string());
-    let script = worker_script();
 
     let mut child = Command::new("node")
         .arg(&script)
-        .env("BROWSER_PROFILES_DIR", &profiles_dir)
+        .env("BROWSER_PROFILES_DIR", &profiles)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
         .map_err(|e| format!("failed to spawn node ({}): {}", script, e))?;
 
-    let stdin = child.stdin.take().ok_or("no stdin")?;
-    let stdout = child.stdout.take().ok_or("no stdout")?;
+    let req_id: u64 = 1;
+    let mut req = req;
+    req["id"] = json!(req_id);
 
-    let pending: Arc<Mutex<HashMap<u64, Sender<Value>>>> = Arc::new(Mutex::new(HashMap::new()));
-    let pending_reader = pending.clone();
+    {
+        let mut stdin = child.stdin.take().ok_or("worker has no stdin")?;
+        stdin
+            .write_all((serde_json::to_string(&req).map_err(|e| e.to_string())? + "\n").as_bytes())
+            .map_err(|e| format!("worker write error: {}", e))?;
+        let _ = stdin.flush();
+    } // drop stdin -> EOF after the single request line
+
+    let stdout = child.stdout.take().ok_or("worker has no stdout")?;
+    let (tx, rx) = std::sync::mpsc::channel::<Value>();
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
             let Ok(line) = line else { continue };
             let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
-            let Some(id) = v.get("id").and_then(|x| x.as_u64()) else { continue };
-            if let Some(tx) = pending_reader.lock().unwrap().remove(&id) {
+            if v.get("id").and_then(|x| x.as_u64()) == Some(req_id) {
                 let _ = tx.send(v);
+                return;
             }
         }
+        let _ = tx.send(json!({ "id": req_id, "ok": false, "error": "worker closed without response" }));
     });
 
-    Ok(Worker {
-        stdin: Mutex::new(stdin),
-        pending,
-        next_id: AtomicU64::new(1),
-        _child: child,
-    })
-}
+    let result = rx
+        .recv_timeout(timeout)
+        .map_err(|_| format!("Browser worker timeout ({}s)", timeout.as_secs()));
 
-fn ensure_worker() -> Option<&'static Worker> {
-    WORKER
-        .get_or_init(|| match spawn_worker() {
-            Ok(w) => Some(w),
-            Err(e) => {
-                eprintln!("[browser_worker] worker spawn failed: {}", e);
-                None
-            }
-        })
-        .as_ref()
-}
-
-fn send_request_with_timeout(req: Value, timeout: Duration) -> Result<Value, String> {
-    let worker = ensure_worker().ok_or_else(|| {
-        "не удалось запустить браузерный воркер (проверьте node и automation/worker.mjs)"
-            .to_string()
-    })?;
-
-    let id = worker.next_id.fetch_add(1, Ordering::SeqCst);
-    let (tx, rx): (Sender<Value>, Receiver<Value>) = channel();
-    worker.pending.lock().unwrap().insert(id, tx);
-
-    let mut req = req;
-    req["id"] = json!(id);
-    let line = serde_json::to_string(&req).map_err(|e| e.to_string())? + "\n";
-
-    {
-        let mut stdin = worker.stdin.lock().unwrap();
-        stdin
-            .write_all(line.as_bytes())
-            .map_err(|e| format!("worker stdin error: {}", e))?;
-        stdin
-            .flush()
-            .map_err(|e| format!("worker stdin flush error: {}", e))?;
-    }
-
-    rx.recv_timeout(timeout)
-        .map_err(|e| format!("Browser worker timeout: {}", e))
-}
-
-fn send_request(req: Value) -> Result<Value, String> {
-    send_request_with_timeout(req, Duration::from_secs(360))
+    let _ = child.wait();
+    result
 }
 
 fn set_login_status(account_id: &str, status: Value) {
@@ -150,8 +109,7 @@ fn set_login_status(account_id: &str, status: Value) {
     }
 }
 
-/// Start a manual (headed) login for an account. Returns immediately; the
-/// browser window stays open until the user logs in. Poll `browser_login_status`.
+/// Start a manual (headed) login. Returns immediately; poll `browser_login_status`.
 #[tauri::command]
 pub fn browser_login_start(
     app: tauri::AppHandle,
@@ -173,26 +131,10 @@ pub fn browser_login_start(
         .unwrap()
         .insert(account_id.clone(), json!({ "status": "pending" }));
 
-    // Fast readiness check so a failed worker surfaces immediately instead of hanging.
-    match send_request_with_timeout(json!({ "cmd": "ping" }), Duration::from_secs(20)) {
-        Ok(v) if v.get("ok").and_then(|x| x.as_bool()) == Some(true) => {}
-        Ok(v) => {
-            set_login_status(
-                &account_id,
-                json!({ "status": "error", "error": format!("воркер не отвечает: {}", v) }),
-            );
-            return Ok(json!({ "accountId": account_id }));
-        }
-        Err(e) => {
-            set_login_status(&account_id, json!({ "status": "error", "error": e }));
-            return Ok(json!({ "accountId": account_id }));
-        }
-    }
-
     let account_id_for_thread = account_id.clone();
     std::thread::spawn(move || {
         let req = json!({ "cmd": "login", "accountId": account_id_for_thread, "platform": platform });
-        let result = match send_request(req) {
+        let result = match run_worker(req, Duration::from_secs(360)) {
             Ok(v) if v.get("ok").and_then(|x| x.as_bool()) == Some(true) => {
                 json!({ "status": "success" })
             }
@@ -214,7 +156,6 @@ pub fn browser_login_status(account_id: String) -> Result<Value, String> {
     Ok(status)
 }
 
-/// Run a browser action with a persisted session.
 #[tauri::command]
 pub fn browser_action(
     account_id: String,
@@ -229,7 +170,7 @@ pub fn browser_action(
         "action": action,
         "params": params.unwrap_or(json!({})),
     });
-    send_request(req)
+    run_worker(req, Duration::from_secs(360))
 }
 
 /// Publish a post through the browser (blocking). Used by the scheduler for
@@ -248,9 +189,9 @@ pub fn post(
         "params": { "content": content, "mediaPaths": media_paths },
     });
 
-    let resp = send_request(req)?;
-    let ok = resp.get("ok").and_then(|x| x.as_bool()) == Some(true);
-    if !ok {
+    let resp = run_worker(req, Duration::from_secs(360))?;
+
+    if resp.get("ok").and_then(|x| x.as_bool()) != Some(true) {
         return Err(resp
             .get("error")
             .and_then(|x| x.as_str())
