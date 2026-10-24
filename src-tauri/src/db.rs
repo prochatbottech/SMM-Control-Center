@@ -5,9 +5,9 @@ use sqlx::{
 };
 use uuid::Uuid;
 use crate::models::{
-    Account, ApiCredential, AutomationQueueItem, CreateAccountInput, CreateLeadInput,
-    CreatePostInput, DestinationInfo, EnrichedAutomationQueueItem, Lead, Post, PostRow,
-    PostStatus,
+    Account, ApiCredential, AudienceContact, AutomationQueueItem, CreateAccountInput,
+    CreateLeadInput, CreatePostInput, DestinationInfo, EnrichedAutomationQueueItem, Lead, Post,
+    PostRow, PostStatus,
 };
 
 pub const DB_FILE_NAME: &str = "smm_local.db";
@@ -17,6 +17,7 @@ pub const MIGRATION_03_SQL: &str = include_str!("../migrations/03_api_credential
 pub const MIGRATION_04_SQL: &str = include_str!("../migrations/04_crm_and_funnels.sql");
 pub const MIGRATION_05_SQL: &str = include_str!("../migrations/05_post_format.sql");
 pub const MIGRATION_06_SQL: &str = include_str!("../migrations/06_account_target.sql");
+pub const MIGRATION_07_SQL: &str = include_str!("../migrations/07_audience.sql");
 pub const INITIAL_MIGRATION_SQL: &str = MIGRATION_01_SQL;
 
 /// Holds the SQLite connection pool as Tauri managed state
@@ -218,6 +219,24 @@ pub async fn apply_migrations(pool: &SqlitePool) -> Result<(), String> {
             .execute(pool)
             .await
             .map_err(|e| format!("Failed to record migration 06: {}", e))?;
+    }
+
+    // Migration 07 (Audience contacts parsed via browser automation)
+    if !applied_versions.contains(&7) {
+        for statement in MIGRATION_07_SQL.split(';') {
+            let trimmed = statement.trim();
+            if !trimmed.is_empty() {
+                sqlx::query(trimmed)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| format!("Migration 07 statement failed ({}): {}", trimmed, e))?;
+            }
+        }
+        sqlx::query("INSERT INTO _schema_migrations (version, applied_at) VALUES (7, ?)")
+            .bind(chrono::Utc::now().timestamp())
+            .execute(pool)
+            .await
+            .map_err(|e| format!("Failed to record migration 07: {}", e))?;
     }
 
     Ok(())
@@ -1228,6 +1247,99 @@ pub async fn update_queue_task_status(
     .execute(pool)
     .await
     .map_err(|e| format!("Failed to update queue task status: {}", e))?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+// ==========================================
+// Audience Contacts Operations
+// ==========================================
+
+/// Insert parsed contacts, ignoring duplicates (unique per account + href).
+pub async fn add_audience_contacts(
+    pool: &SqlitePool,
+    account_id: &str,
+    platform: &str,
+    source: &str,
+    contacts: &[(String, String)],
+) -> Result<usize, String> {
+    let now = chrono::Utc::now().timestamp();
+    let mut inserted = 0usize;
+
+    for (href, name) in contacts {
+        let result = sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO audience_contacts
+                (id, account_id, platform, source, profile_href, name, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'new', ?, ?)
+            "#,
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(account_id)
+        .bind(platform)
+        .bind(source)
+        .bind(href)
+        .bind(name)
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to insert audience contact '{}': {}", href, e))?;
+
+        inserted += result.rows_affected() as usize;
+    }
+
+    Ok(inserted)
+}
+
+pub async fn get_audience_contacts(
+    pool: &SqlitePool,
+    account_id: Option<&str>,
+) -> Result<Vec<AudienceContact>, String> {
+    let rows: Vec<AudienceContact> = match account_id {
+        Some(id) => {
+            sqlx::query_as::<_, AudienceContact>(
+                "SELECT * FROM audience_contacts WHERE account_id = ? ORDER BY created_at DESC, name ASC",
+            )
+            .bind(id)
+            .fetch_all(pool)
+            .await
+        }
+        None => {
+            sqlx::query_as::<_, AudienceContact>(
+                "SELECT * FROM audience_contacts ORDER BY created_at DESC, name ASC",
+            )
+            .fetch_all(pool)
+            .await
+        }
+    }
+    .map_err(|e| format!("Failed to fetch audience contacts: {}", e))?;
+
+    Ok(rows)
+}
+
+pub async fn set_audience_contact_status(
+    pool: &SqlitePool,
+    id: &str,
+    status: &str,
+) -> Result<bool, String> {
+    let result = sqlx::query("UPDATE audience_contacts SET status = ?, updated_at = ? WHERE id = ?")
+        .bind(status)
+        .bind(chrono::Utc::now().timestamp())
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to update audience contact status: {}", e))?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn delete_audience_contact(pool: &SqlitePool, id: &str) -> Result<bool, String> {
+    let result = sqlx::query("DELETE FROM audience_contacts WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to delete audience contact: {}", e))?;
 
     Ok(result.rows_affected() > 0)
 }

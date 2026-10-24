@@ -45,6 +45,21 @@ impl Account {
     }
 }
 
+/// Audience contact parsed from a social network via browser automation
+#[derive(Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct AudienceContact {
+    pub id: String,
+    pub account_id: String,
+    pub platform: String,
+    pub source: Option<String>,
+    pub profile_href: String,
+    pub name: Option<String>,
+    /// new | friend_requested | friend | message_sent | skipped
+    pub status: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 /// Invariant: Redact encrypted_token in logs and debug printing
 impl std::fmt::Debug for Account {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

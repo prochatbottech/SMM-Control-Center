@@ -105,6 +105,11 @@ async function cmdAction(req) {
       return { error: `resolve_target not implemented for ${platform}` };
     }
 
+    if (action === 'parse_members') {
+      if (platform === 'vk') return await parseVkMembers(page, params);
+      return { error: `parse_members not implemented for ${platform}` };
+    }
+
     if (action === 'post') {
       if (platform === 'vk') return await postVk(page, params);
       if (platform === 'ok') return await postOk(page, params);
@@ -218,6 +223,133 @@ async function resolveVkTarget(page, query) {
     .trim();
 
   return { targetId: `-${gid}`, targetTitle: title || `Сообщество ${gid}`, screenName: q };
+}
+
+// Non-profile links found in the mobile VK nav (excluded from parsing).
+const VK_NAV = new Set([
+  '/feed',
+  '/im',
+  '/mail',
+  '/friends',
+  '/groups',
+  '/clips',
+  '/audio',
+  '/music',
+  '/video',
+  '/videos',
+  '/services',
+  '/market',
+  '/orders',
+  '/bookmarks',
+  '/docs',
+  '/files',
+  '/games',
+  '/apps',
+  '/search',
+  '/settings',
+  '/help',
+  '/support',
+  '/pay',
+  '/store',
+  '/notes',
+  '/calls',
+  '/reactions',
+  '/ads',
+  '/vk',
+  '/',
+]);
+
+function isVkProfileHref(href) {
+  if (!href || VK_NAV.has(href)) return false;
+  if (!/^\/[A-Za-z0-9_.]{2,32}$/.test(href)) return false;
+  // Media/utility namespaces that are not user profiles.
+  if (/^\/(photos|audios|videos|albums|board|topic|wall|away|login|join|share|dev|faq|about)/.test(href)) {
+    return false;
+  }
+  return true;
+}
+
+// Parse community subscribers from the mobile members page.
+async function parseVkMembers(page, params) {
+  const q = vkNormalize(params.query || params.targetId || '');
+  const limit = Math.min(Math.max(Number(params.limit) || 50, 1), 300);
+  if (!q) return { error: 'empty community reference' };
+
+  const name = q.replace(/^-/, '').replace(/^(club|public)/, '');
+  try {
+    await page.goto(`https://m.vk.com/${encodeURIComponent(name)}?act=members`, {
+      waitUntil: 'load',
+    });
+    await page.waitForTimeout(4000);
+
+    if (/login/i.test(page.url())) {
+      return { error: 'not logged in (session expired) — re-login in the browser', url: page.url() };
+    }
+
+    const collect = () =>
+      page.evaluate(
+        ({ navArr }) => {
+          const nav = new Set(navArr);
+          const anchors = Array.from(document.querySelectorAll('a[href]'));
+          const rows = [];
+          let own = '';
+          for (const a of anchors) {
+            const href = a.getAttribute('href') || '';
+            const text = (a.textContent || '').trim().replace(/\s+/g, ' ');
+            if (!text) continue;
+            if (!/^\/[A-Za-z0-9_.]{2,32}$/.test(href)) continue;
+            if (nav.has(href)) continue;
+            if (
+              /^\/(photos|audios|videos|albums|board|topic|wall|away|login|join|share|dev|faq|about)/.test(
+                href
+              )
+            ) {
+              continue;
+            }
+            // The first profile-ish link in the mobile nav is the logged-in user.
+            if (!own) own = href;
+            rows.push({ href, name: text.slice(0, 80) });
+          }
+          return { own, rows };
+        },
+        { navArr: Array.from(VK_NAV) }
+      );
+
+    const seen = new Map();
+    let own = '';
+    let stagnant = 0;
+    let prev = 0;
+
+    for (let i = 0; i < 20 && seen.size < limit; i++) {
+      const { own: ownHref, rows } = await collect();
+      if (ownHref) own = ownHref;
+
+      for (const r of rows) {
+        if (r.href === own) continue;
+        if (!seen.has(r.href)) seen.set(r.href, r);
+        if (seen.size >= limit) break;
+      }
+
+      if (seen.size === prev) stagnant += 1;
+      else stagnant = 0;
+      prev = seen.size;
+
+      if (stagnant >= 2) break;
+      await humanScroll(page, 1).catch(() => {});
+      await humanPause(1200, 2600);
+    }
+
+    const members = Array.from(seen.values()).slice(0, limit);
+    return {
+      ok: true,
+      url: page.url(),
+      community: name,
+      count: members.length,
+      members,
+    };
+  } catch (err) {
+    return { error: `${String(err && err.message ? err.message : err)} @ ${page.url()}` };
+  }
 }
 
 // Community wall post on the desktop UI (verified flow):

@@ -5,9 +5,10 @@ import { AccountsView } from './components/AccountsView';
 import { PostsView } from './components/PostsView';
 import { ContentGrabberView } from './components/ContentGrabberView';
 import { CRMView } from './components/CRMView';
+import { AudienceView } from './components/AudienceView';
 import { AnalyticsView } from './components/AnalyticsView';
 import { SettingsView } from './components/SettingsView';
-import { Calendar, Users, Sparkles, RefreshCw, ArrowDownCircle, Rss, Bot, Terminal, GitFork, BarChart3, Database } from 'lucide-react';
+import { Calendar, Users, Sparkles, RefreshCw, ArrowDownCircle, Rss, Bot, Terminal, GitFork, BarChart3, Database, UserPlus } from 'lucide-react';
 import { Toaster } from 'sonner';
 import { useUpdater } from './hooks/useUpdater';
 import { UpdateDialog } from './components/UpdateDialog';
@@ -17,7 +18,7 @@ import { LogTerminal } from './components/LogTerminal';
 import { useSystemLogs } from './hooks/useSystemLogs';
 import { useWorkerStatusQuery } from './hooks/useWorkerStatus';
 
-type ActiveTab = 'posts' | 'grabber' | 'accounts' | 'crm' | 'analytics' | 'settings';
+type ActiveTab = 'posts' | 'grabber' | 'accounts' | 'audience' | 'crm' | 'analytics' | 'settings';
 
 export function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('posts');
@@ -101,6 +102,18 @@ export function App() {
             >
               <Users className="w-4 h-4 text-emerald-500" />
               Аккаунты
+            </button>
+
+            <button
+              onClick={() => setActiveTab('audience')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition-all ${
+                activeTab === 'audience'
+                  ? 'bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-50 shadow-xs'
+                  : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200'
+              }`}
+            >
+              <UserPlus className="w-4 h-4 text-teal-500" />
+              Аудитория
             </button>
 
             <button
@@ -238,6 +251,7 @@ export function App() {
         {activeTab === 'posts' && <PostsView />}
         {activeTab === 'grabber' && <ContentGrabberView />}
         {activeTab === 'accounts' && <AccountsView />}
+        {activeTab === 'audience' && <AudienceView />}
         {activeTab === 'crm' && <CRMView />}
         {activeTab === 'analytics' && <AnalyticsView onNavigateToCRM={() => setActiveTab('crm')} />}
         {activeTab === 'settings' && <SettingsView />}

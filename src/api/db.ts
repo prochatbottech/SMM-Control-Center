@@ -707,4 +707,45 @@ export async function browserResolveTarget(
   return { targetId: res.targetId, targetTitle: res.targetTitle || res.targetId };
 }
 
+// ============================================================================
+// Audience contacts (parsed via browser automation)
+// ============================================================================
+
+export interface AudienceContact {
+  id: string;
+  account_id: string;
+  platform: string;
+  source?: string | null;
+  profile_href: string;
+  name?: string | null;
+  status: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export async function parseAudience(
+  accountId: string,
+  query: string,
+  limit?: number
+): Promise<{ parsed: number; inserted: number; contacts: AudienceContact[] }> {
+  return await safeInvoke<{ parsed: number; inserted: number; contacts: AudienceContact[] }>(
+    'parse_audience',
+    { accountId, query, limit: limit ?? 50 }
+  );
+}
+
+export async function listAudience(accountId?: string | null): Promise<AudienceContact[]> {
+  return await safeInvoke<AudienceContact[]>('list_audience', {
+    accountId: accountId ?? null,
+  });
+}
+
+export async function setAudienceStatus(id: string, status: string): Promise<boolean> {
+  return await safeInvoke<boolean>('set_audience_status', { id, status });
+}
+
+export async function deleteAudienceContact(id: string): Promise<boolean> {
+  return await safeInvoke<boolean>('delete_audience_contact', { id });
+}
+
 

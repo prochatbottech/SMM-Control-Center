@@ -461,7 +461,127 @@ pub async fn vk_resolve_target(token: String, query: String) -> Result<serde_jso
     Ok(serde_json::json!({ "targetId": target_id, "title": title }))
 }
 
-/// Get a valid VK access token for an account (decrypt stored creds + refresh if
+// ============================================================================
+// Audience parsing (browser automation)
+// ============================================================================
+
+/// Parse community subscribers with the browser worker and store new contacts.
+#[tauri::command]
+pub async fn parse_audience(
+    state: State<'_, DbState>,
+    account_id: String,
+    query: String,
+    limit: Option<u32>,
+) -> Result<JsonValue, String> {
+    let account = db::get_account_by_id(&state.pool, &account_id)
+        .await?
+        .ok_or_else(|| format!("Account '{}' not found", account_id))?;
+
+    if account.auth_type.as_deref() != Some("browser") {
+        return Err("Аудиторию можно парсить только для браузерных аккаунтов".to_string());
+    }
+
+    let platform = account.platform.clone();
+    let platform_for_save = platform.clone();
+    let acc_id = account.id.clone();
+    let query_for_worker = query.clone();
+    let limit_value = limit.unwrap_or(50).min(300);
+
+    let resp = tokio::task::spawn_blocking(move || {
+        crate::browser_worker::browser_action(
+            acc_id,
+            platform,
+            "parse_members".to_string(),
+            Some(serde_json::json!({ "query": query_for_worker, "limit": limit_value })),
+        )
+    })
+    .await
+    .map_err(|e| format!("Browser worker task failed: {}", e))??;
+
+    if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        return Err(resp
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("browser worker error")
+            .to_string());
+    }
+
+    let data = resp.get("data").cloned().unwrap_or(serde_json::json!({}));
+    if let Some(err) = data.get("error").and_then(|v| v.as_str()) {
+        return Err(err.to_string());
+    }
+
+    let members: Vec<(String, String)> = data
+        .get("members")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|m| {
+                    let href = m.get("href")?.as_str()?.to_string();
+                    let name = m
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    Some((href, name))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if members.is_empty() {
+        return Err(
+            "Не удалось найти участников (список может быть скрыт в этом сообществе)".to_string(),
+        );
+    }
+
+    let inserted = db::add_audience_contacts(
+        &state.pool,
+        &account_id,
+        &platform_for_save,
+        &query,
+        &members,
+    )
+    .await?;
+
+    let contacts = db::get_audience_contacts(&state.pool, Some(&account_id)).await?;
+
+    Ok(serde_json::json!({
+        "parsed": members.len(),
+        "inserted": inserted,
+        "contacts": contacts,
+    }))
+}
+
+/// List stored audience contacts (optionally for a single account).
+#[tauri::command]
+pub async fn list_audience(
+    state: State<'_, DbState>,
+    account_id: Option<String>,
+) -> Result<JsonValue, String> {
+    let contacts = db::get_audience_contacts(&state.pool, account_id.as_deref()).await?;
+    serde_json::to_value(&contacts).map_err(|e| format!("Serialization error: {}", e))
+}
+
+/// Set the workflow status of an audience contact.
+#[tauri::command]
+pub async fn set_audience_status(
+    state: State<'_, DbState>,
+    id: String,
+    status: String,
+) -> Result<bool, String> {
+    db::set_audience_contact_status(&state.pool, &id, &status).await
+}
+
+/// Delete a single audience contact.
+#[tauri::command]
+pub async fn delete_audience_contact(
+    state: State<'_, DbState>,
+    id: String,
+) -> Result<bool, String> {
+    db::delete_audience_contact(&state.pool, &id).await
+}/// Get a valid VK access token for an account (decrypt stored creds + refresh if
 /// expired). Persists refreshed creds back to the account.
 async fn vk_account_access(
     pool: &sqlx::SqlitePool,
