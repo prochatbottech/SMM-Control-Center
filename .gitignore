@@ -38,3 +38,8 @@ src-tauri/gen/schemas/
 .env
 .env.*
 !.env.example
+
+# Browser automation artifacts (profiles, debug dumps)
+browser_profiles/
+automation/*.png
+automation/*.txt

@@ -86,6 +86,7 @@ pub fn run() {
             .map_err(|e| format!("Database initialization failed: {}", e))?;
 
             // Invariant: Start background scheduler worker non-blocking via tokio::spawn
+            browser_worker::init(app.handle());
             scheduler::start_worker(app.handle().clone(), pool.clone());
 
             // Invariant: Start background CRM Funnel Automation worker

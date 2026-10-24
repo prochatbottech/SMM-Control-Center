@@ -112,55 +112,48 @@ async function cmdAction(req) {
 }
 
 // VK post via the mobile web composer (verified flow):
-// feed → «Создать пост» → span[contenteditable] → «Далее» → «Опубликовать».
+// m.vk.com/new_post → span[contenteditable] → «Далее» → «Опубликовать».
 async function postVk(page, params) {
   const { content = '', mediaPaths = [] } = params;
-  await page.goto('https://m.vk.com/feed', { waitUntil: 'load' }).catch(() => {});
-  await page.waitForTimeout(5000);
-  await humanScroll(page, 1);
-
-  if (/login/i.test(page.url())) {
-    return { error: 'not logged in (session expired) — re-login in the browser', url: page.url() };
-  }
-
-  // Open composer via the feed button; fall back to the direct new_post page.
-  const createBtn = page.getByText('Создать пост', { exact: false }).first();
-  let opened = false;
-  if ((await createBtn.count()) > 0 && (await createBtn.isVisible().catch(() => false))) {
-    await createBtn.click({ timeout: 15000 }).catch(() => {});
-    opened = true;
-  }
-  if (!opened) {
+  try {
     await page.goto('https://m.vk.com/new_post', { waitUntil: 'load' }).catch(() => {});
     await page.waitForTimeout(4000);
-  }
 
-  const composer = page.locator('span[contenteditable="true"][role="textbox"]').first();
-  await composer.waitFor({ state: 'visible', timeout: 30000 });
-
-  await composer.click();
-  await humanPause(500, 1200);
-  await humanType(page, content);
-  await humanPause();
-
-  if (mediaPaths.length > 0) {
-    for (const p of mediaPaths) {
-      await page.locator('input[type="file"]').first().setInputFiles(p).catch(() => {});
-      await humanPause(1500, 3000);
+    if (/login/i.test(page.url())) {
+      return { error: 'not logged in (session expired) — re-login in the browser', url: page.url() };
     }
+
+    await humanScroll(page, 1).catch(() => {});
+
+    const composer = page.locator('span[contenteditable="true"][role="textbox"]').first();
+    await composer.waitFor({ state: 'visible', timeout: 30000 });
+
+    await composer.click();
+    await humanPause(500, 1200);
+    await humanType(page, content);
+    await humanPause();
+
+    if (mediaPaths.length > 0) {
+      for (const p of mediaPaths) {
+        await page.locator('input[type="file"]').first().setInputFiles(p).catch(() => {});
+        await humanPause(1500, 3000);
+      }
+    }
+
+    const nextBtn = page.getByText('Далее', { exact: true }).first();
+    await nextBtn.waitFor({ state: 'visible', timeout: 20000 });
+    await nextBtn.click({ timeout: 20000 });
+    await humanPause(1500, 3000);
+
+    const publishBtn = page.getByText('Опубликовать', { exact: true }).first();
+    await publishBtn.waitFor({ state: 'visible', timeout: 20000 });
+    await publishBtn.click({ timeout: 20000 });
+    await humanPause(2000, 4000);
+
+    return { ok: true, url: page.url() };
+  } catch (err) {
+    return { error: `${String(err && err.message ? err.message : err)} @ ${page.url()}` };
   }
-
-  const nextBtn = page.getByText('Далее', { exact: true }).first();
-  await nextBtn.waitFor({ state: 'visible', timeout: 20000 });
-  await nextBtn.click({ timeout: 20000 });
-  await humanPause(1500, 3000);
-
-  const publishBtn = page.getByText('Опубликовать', { exact: true }).first();
-  await publishBtn.waitFor({ state: 'visible', timeout: 20000 });
-  await publishBtn.click({ timeout: 20000 });
-  await humanPause(2000, 4000);
-
-  return { ok: true, url: page.url() };
 }
 
 // Best-effort OK status/group post.

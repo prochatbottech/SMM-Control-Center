@@ -103,6 +103,18 @@ fn run_worker(req: Value, timeout: Duration) -> Result<Value, String> {
     result
 }
 
+/// Resolve and cache the persistent profile directory at app startup so that
+/// scheduled posts work after a restart without a prior manual login call.
+pub fn init(app: &tauri::AppHandle) {
+    if let Ok(dir) = app.path().app_data_dir() {
+        PROFILES_DIR.get_or_init(|| {
+            dir.join("browser_profiles")
+                .to_string_lossy()
+                .to_string()
+        });
+    }
+}
+
 fn set_login_status(account_id: &str, status: Value) {
     if let Some(map) = LOGIN_STATUS.get() {
         map.lock().unwrap().insert(account_id.to_string(), status);
