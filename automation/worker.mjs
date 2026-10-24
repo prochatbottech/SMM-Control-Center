@@ -511,45 +511,42 @@ async function postVkCommunity(page, params, target) {
   }
 }
 
-// Best-effort OK status/group post.
+// OK post via the note editor (verified flow):
+// ok.ru/post → .posting_itx editor → «Поделиться».
 async function postOk(page, params) {
-  const { content = '', targetUrl } = params;
-  const start = targetUrl || 'https://ok.ru/';
-  await page.goto(start, { waitUntil: 'domcontentloaded' });
-  await humanPause(1500, 3500);
+  const { content = '', mediaPaths = [] } = params;
+  try {
+    await page.goto('https://ok.ru/post', { waitUntil: 'domcontentloaded' }).catch(() => {});
+    await page.waitForTimeout(6000);
 
-  const composerSelectors = [
-    'div[data-module="postingForm"] div[contenteditable="true"]',
-    'textarea[placeholder*="поделиться"]',
-    'div[contenteditable="true"]',
-  ];
-  let found = null;
-  for (const sel of composerSelectors) {
-    const loc = page.locator(sel).first();
-    if ((await loc.count()) > 0 && (await loc.isVisible().catch(() => false))) {
-      found = sel;
-      break;
+    if (/login|vkid|account\/login/i.test(page.url())) {
+      return { error: 'not logged in (session expired) — re-login in the browser', url: page.url() };
     }
-  }
-  if (!found) return { error: 'composer not found', url: page.url() };
 
-  await humanClick(page, found);
-  await humanType(page, content);
-  await humanPause();
+    const editor = page.locator('.posting_itx').first();
+    await editor.waitFor({ state: 'visible', timeout: 30000 });
 
-  const publishSelectors = [
-    'button[data-l="t,button.submit"]',
-    'button:has-text("Поделиться")',
-  ];
-  for (const sel of publishSelectors) {
-    const btn = page.locator(sel).first();
-    if ((await btn.count()) > 0 && (await btn.isVisible().catch(() => false))) {
-      await humanClick(page, sel);
-      await humanPause(1500, 3000);
-      return { ok: true, url: page.url() };
+    await editor.click();
+    await humanPause(400, 1000);
+    await humanType(page, content);
+    await humanPause();
+
+    if (mediaPaths.length > 0) {
+      for (const p of mediaPaths) {
+        await page.locator('input[type="file"]').first().setInputFiles(p).catch(() => {});
+        await humanPause(2000, 4000);
+      }
     }
+
+    const shareBtn = page.getByText('Поделиться', { exact: true }).first();
+    await shareBtn.waitFor({ state: 'visible', timeout: 20000 });
+    await shareBtn.click({ timeout: 20000 });
+    await humanPause(2500, 4500);
+
+    return { ok: true, url: page.url() };
+  } catch (err) {
+    return { error: `${String(err && err.message ? err.message : err)} @ ${page.url()}` };
   }
-  return { error: 'publish button not found', url: page.url() };
 }
 
 const handlers = { ping: cmdPing, login: cmdLogin, action: cmdAction };
