@@ -4,13 +4,106 @@
 // Request:  { "id": number, "cmd": string, ...args }
 // Response: { "id": number, "ok": boolean, "data"?: any, "error"?: string }
 
-import { chromium } from 'playwright';
 import { join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import readline from 'node:readline';
 import { humanPause, humanType, humanClick, humanFill, humanScroll } from './human.js';
 
 const PROFILES_DIR = process.env.BROWSER_PROFILES_DIR || join(process.cwd(), '.browser_profiles');
 const LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
+
+// Playwright lives outside this script once packaged: the Rust side passes the
+// absolute package directory so the worker does not depend on the process cwd or
+// on a node_modules tree next to the app resources. A bare directory URL is not
+// importable, so it is resolved to the package entry point first.
+function moduleEntry(packageDir) {
+  for (const entry of ['index.mjs', 'index.js']) {
+    const candidate = join(packageDir, entry);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+async function loadChromium() {
+  const candidates = [];
+  if (process.env.PLAYWRIGHT_MODULE_PATH) {
+    const dir = process.env.PLAYWRIGHT_MODULE_PATH;
+    const entry = moduleEntry(dir);
+    // Fail loudly instead of silently falling back to a dev-only install.
+    if (!entry) {
+      throw new Error(
+        `PLAYWRIGHT_MODULE_PATH points to "${dir}", but it is not a Playwright package ` +
+          '(index.mjs / index.js not found). Rebuild with `pnpm prepare:automation`.'
+      );
+    }
+    candidates.push(entry);
+  }
+  candidates.push('playwright', 'playwright-core');
+
+  const failures = [];
+  for (const candidate of candidates) {
+    const isPath = candidate.includes('/') || candidate.includes('\\');
+    const specifier = isPath ? pathToFileURL(candidate).href : candidate;
+    try {
+      const mod = await import(specifier);
+      const chromium = mod.chromium ?? mod.default?.chromium;
+      if (chromium) return { chromium, resolvedFrom: candidate };
+      failures.push(`${candidate}: module has no chromium export`);
+    } catch (err) {
+      failures.push(`${candidate}: ${err && err.message ? err.message : String(err)}`);
+    }
+  }
+
+  throw new Error(
+    `Playwright is not available. Tried:\n  ${failures.join('\n  ')}\n` +
+      'Install it with `pnpm add -D playwright` or bundle the runtime via `pnpm prepare:automation`.'
+  );
+}
+
+const { chromium, resolvedFrom: PLAYWRIGHT_SOURCE } = await loadChromium();
+
+// Launching order: an explicitly configured channel, then browsers already
+// installed on the machine (Edge ships with Windows, Chrome is common), and only
+// then a Playwright-managed Chromium download.
+const BROWSER_CANDIDATES = [
+  process.env.BROWSER_CHANNEL,
+  'msedge',
+  'chrome',
+  undefined,
+].filter((v, i, arr) => arr.indexOf(v) === i);
+
+let selectedBrowser; // cached { label, channel } after the first successful launch
+
+function isMissingExecutable(err) {
+  const msg = String(err && err.message ? err.message : err);
+  return /Executable doesn't exist|is not found|Cannot find|ENOENT/i.test(msg);
+}
+
+async function launchPersistentContext(userDataDir, options) {
+  const order = selectedBrowser
+    ? [selectedBrowser]
+    : BROWSER_CANDIDATES.map((channel) => ({ label: channel || 'bundled-chromium', channel }));
+
+  const failures = [];
+  for (const candidate of order) {
+    try {
+      const ctx = await chromium.launchPersistentContext(userDataDir, {
+        ...options,
+        ...(candidate.channel ? { channel: candidate.channel } : {}),
+      });
+      selectedBrowser = candidate;
+      return ctx;
+    } catch (err) {
+      failures.push(`${candidate.label}: ${err && err.message ? err.message : String(err)}`);
+      // A missing browser is worth skipping; anything else is a real failure of
+      // this launch and must not be retried with another channel silently.
+      if (!isMissingExecutable(err)) break;
+    }
+  }
+
+  throw new Error(`Could not launch a browser.\n  ${failures.join('\n  ')}`);
+}
 
 function send(obj) {
   process.stdout.write(JSON.stringify(obj) + '\n');
@@ -19,6 +112,7 @@ function send(obj) {
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
+
 
 function platformConfig(platform) {
   const visibleText = async (page) =>
@@ -70,7 +164,12 @@ function platformConfig(platform) {
 }
 
 async function cmdPing() {
-  return { pong: true };
+  return {
+    pong: true,
+    node: process.version,
+    playwright: PLAYWRIGHT_SOURCE,
+    browser: selectedBrowser ? selectedBrowser.label : null,
+  };
 }
 
 // Opens a headed persistent-context browser and waits for the user to log in.
@@ -80,7 +179,7 @@ async function cmdLogin(req) {
   if (!cfg) return { error: `unknown platform: ${platform}` };
 
   const userDataDir = join(PROFILES_DIR, accountId);
-  const ctx = await chromium.launchPersistentContext(userDataDir, { headless: false });
+  const ctx = await launchPersistentContext(userDataDir, { headless: false });
   const page = ctx.pages()[0] || (await ctx.newPage());
   await page.goto(cfg.url, { waitUntil: 'domcontentloaded' }).catch(() => {});
 
@@ -108,7 +207,7 @@ async function cmdAction(req) {
   if (!cfg) return { error: `unknown platform: ${platform}` };
 
   const userDataDir = join(PROFILES_DIR, accountId);
-  const ctx = await chromium.launchPersistentContext(userDataDir, {
+  const ctx = await launchPersistentContext(userDataDir, {
     headless: false,
     args: ['--window-position=-2400,-2400', '--window-size=1280,900'],
     viewport: { width: 1280, height: 900 },

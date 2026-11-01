@@ -177,6 +177,7 @@ pub fn run() {
             browser_worker::browser_login_start,
             browser_worker::browser_login_status,
             browser_worker::browser_action,
+            browser_worker::browser_runtime_status,
             commands::parse_audience,
             commands::list_audience,
             commands::set_audience_status,
@@ -671,6 +672,190 @@ mod tests {
             *counts.get("Failing Channel B").unwrap_or(&0),
             2,
             "Account B was retried"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stuck_publishing_post_is_recovered_and_republished() {
+        let temp_dir = tempdir().expect("Failed to create temp dir");
+        let pool = db::init_db(temp_dir.path()).await.expect("Failed to init db");
+
+        let test_key = [55u8; 32];
+        let encrypted_token = crypto::encrypt_token("token_for_recovery", &test_key).unwrap();
+
+        let acc = db::create_account(
+            &pool,
+            CreateAccountInput {
+                id: None,
+                platform: "vk".to_string(),
+                name: "VK Recovery Group".to_string(),
+                encrypted_token,
+                created_at: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let past = chrono::Utc::now().timestamp() - 600;
+        let post = db::create_post(
+            &pool,
+            CreatePostInput {
+                id: None,
+                content: "Post interrupted by a crash".to_string(),
+                media_urls: None,
+                status: Some("scheduled".to_string()),
+                scheduled_for: Some(past),
+                created_at: None,
+                format: None,
+                destination_account_ids: Some(vec![acc.id.clone()]),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Simulate a publication interrupted after the atomic lock: status stays
+        // 'publishing' and the destination is still 'pending'.
+        assert!(db::try_lock_post_for_publishing(&pool, &post.id).await.unwrap());
+        let locked = db::get_post_by_id(&pool, &post.id).await.unwrap().unwrap();
+        assert_eq!(locked.status, "publishing");
+
+        // A fresh lock must not be released: the scheduler could still be running.
+        let recovered_fresh = db::recover_stuck_publishing_posts(&pool, 900).await.unwrap();
+        assert_eq!(recovered_fresh, 0, "A recent lock must not be recovered");
+
+        // Age the lock beyond the threshold and recover it.
+        sqlx::query("UPDATE posts SET publishing_started_at = ? WHERE id = ?")
+            .bind(chrono::Utc::now().timestamp() - 3600)
+            .bind(&post.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let recovered = db::recover_stuck_publishing_posts(&pool, 900).await.unwrap();
+        assert_eq!(recovered, 1, "Stale lock must be recovered");
+
+        let released = db::get_post_by_id(&pool, &post.id).await.unwrap().unwrap();
+        assert_eq!(released.status, "scheduled", "Recovered post must be re-queued");
+
+        let dests = db::get_post_destinations(&pool, &post.id).await.unwrap();
+        assert_eq!(dests[0].status, "failed", "Interrupted destination must be marked failed");
+        assert!(dests[0].error_log.is_some(), "Interrupted destination needs an explanation");
+
+        // The scheduler must pick it up again on the next iteration.
+        let publisher = publisher::MockPublisher::with_delay(10);
+        let count = scheduler::process_due_posts(None, &pool, &publisher, Some(test_key))
+            .await
+            .expect("Worker execution failed");
+        assert_eq!(count, 1, "Recovered post must be published on the next iteration");
+
+        let final_post = db::get_post_by_id(&pool, &post.id).await.unwrap().unwrap();
+        assert_eq!(final_post.status, "published");
+    }
+
+    #[tokio::test]
+    async fn test_publishing_lock_heartbeat_prevents_false_recovery() {
+        let temp_dir = tempdir().expect("Failed to create temp dir");
+        let pool = db::init_db(temp_dir.path()).await.expect("Failed to init db");
+
+        let acc = db::create_account(
+            &pool,
+            CreateAccountInput {
+                id: None,
+                platform: "vk".to_string(),
+                name: "VK Long Publication".to_string(),
+                encrypted_token: crypto::encrypt_token("tok", &[57u8; 32]).unwrap(),
+                created_at: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let post = db::create_post(
+            &pool,
+            CreatePostInput {
+                id: None,
+                content: "Long running publication".to_string(),
+                media_urls: None,
+                status: Some("scheduled".to_string()),
+                scheduled_for: Some(chrono::Utc::now().timestamp() - 60),
+                created_at: None,
+                format: None,
+                destination_account_ids: Some(vec![acc.id.clone()]),
+            },
+        )
+        .await
+        .unwrap();
+
+        db::try_lock_post_for_publishing(&pool, &post.id).await.unwrap();
+        // Simulate a lock that started long ago but is still being refreshed.
+        sqlx::query("UPDATE posts SET publishing_started_at = ? WHERE id = ?")
+            .bind(chrono::Utc::now().timestamp() - 3600)
+            .bind(&post.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        db::touch_publishing_lock(&pool, &post.id).await.unwrap();
+
+        let recovered = db::recover_stuck_publishing_posts(&pool, 900).await.unwrap();
+        assert_eq!(recovered, 0, "A heartbeating publication must not be recovered");
+
+        let still_locked = db::get_post_by_id(&pool, &post.id).await.unwrap().unwrap();
+        assert_eq!(still_locked.status, "publishing");
+    }
+
+    #[tokio::test]
+    async fn test_recovery_keeps_already_published_destinations() {
+        let temp_dir = tempdir().expect("Failed to create temp dir");
+        let pool = db::init_db(temp_dir.path()).await.expect("Failed to init db");
+
+        let key = [56u8; 32];
+        let acc = db::create_account(
+            &pool,
+            CreateAccountInput {
+                id: None,
+                platform: "vk".to_string(),
+                name: "VK Partial".to_string(),
+                encrypted_token: crypto::encrypt_token("tok", &key).unwrap(),
+                created_at: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let post = db::create_post(
+            &pool,
+            CreatePostInput {
+                id: None,
+                content: "Partially published post".to_string(),
+                media_urls: None,
+                status: Some("scheduled".to_string()),
+                scheduled_for: Some(chrono::Utc::now().timestamp() - 600),
+                created_at: None,
+                format: None,
+                destination_account_ids: Some(vec![acc.id.clone()]),
+            },
+        )
+        .await
+        .unwrap();
+
+        db::try_lock_post_for_publishing(&pool, &post.id).await.unwrap();
+        db::update_destination_status(&pool, &post.id, &acc.id, "published", None)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE posts SET publishing_started_at = ? WHERE id = ?")
+            .bind(chrono::Utc::now().timestamp() - 3600)
+            .bind(&post.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        db::recover_stuck_publishing_posts(&pool, 900).await.unwrap();
+
+        let dests = db::get_post_destinations(&pool, &post.id).await.unwrap();
+        assert_eq!(
+            dests[0].status, "published",
+            "Recovery must never downgrade an already published destination"
         );
     }
 

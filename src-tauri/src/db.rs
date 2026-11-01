@@ -18,6 +18,7 @@ pub const MIGRATION_04_SQL: &str = include_str!("../migrations/04_crm_and_funnel
 pub const MIGRATION_05_SQL: &str = include_str!("../migrations/05_post_format.sql");
 pub const MIGRATION_06_SQL: &str = include_str!("../migrations/06_account_target.sql");
 pub const MIGRATION_07_SQL: &str = include_str!("../migrations/07_audience.sql");
+pub const MIGRATION_08_SQL: &str = include_str!("../migrations/08_publishing_started_at.sql");
 pub const INITIAL_MIGRATION_SQL: &str = MIGRATION_01_SQL;
 
 /// Holds the SQLite connection pool as Tauri managed state
@@ -237,6 +238,27 @@ pub async fn apply_migrations(pool: &SqlitePool) -> Result<(), String> {
             .execute(pool)
             .await
             .map_err(|e| format!("Failed to record migration 07: {}", e))?;
+    }
+
+    // Migration 08 (publishing start timestamp for stuck-post recovery)
+    if !applied_versions.contains(&8) {
+        let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('posts')")
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+
+        if !columns.contains(&"publishing_started_at".to_string()) {
+            sqlx::query("ALTER TABLE posts ADD COLUMN publishing_started_at INTEGER")
+                .execute(pool)
+                .await
+                .map_err(|e| format!("Failed to add publishing_started_at to posts: {}", e))?;
+        }
+
+        sqlx::query("INSERT INTO _schema_migrations (version, applied_at) VALUES (8, ?)")
+            .bind(chrono::Utc::now().timestamp())
+            .execute(pool)
+            .await
+            .map_err(|e| format!("Failed to record migration 08: {}", e))?;
     }
 
     Ok(())
@@ -613,19 +635,87 @@ pub async fn get_due_posts(pool: &SqlitePool, current_timestamp: i64) -> Result<
 /// Invariant: Atomic lock. Changes status from 'scheduled' to 'publishing'.
 /// Returns true if locked successfully, false if already taken or not in 'scheduled' state.
 pub async fn try_lock_post_for_publishing(pool: &SqlitePool, post_id: &str) -> Result<bool, String> {
+    let now = chrono::Utc::now().timestamp();
     let result = sqlx::query(
         r#"
         UPDATE posts
-        SET status = 'publishing'
+        SET status = 'publishing', publishing_started_at = ?
         WHERE id = ? AND status = 'scheduled'
         "#,
     )
+    .bind(now)
     .bind(post_id)
     .execute(pool)
     .await
     .map_err(|e| format!("Failed to atomically lock post '{}': {}", post_id, e))?;
 
     Ok(result.rows_affected() > 0)
+}
+
+/// Refresh the publishing lock timestamp. Called before every destination so a
+/// long multi-account publication is never mistaken for an abandoned one.
+pub async fn touch_publishing_lock(pool: &SqlitePool, post_id: &str) -> Result<(), String> {
+    sqlx::query(
+        "UPDATE posts SET publishing_started_at = ? WHERE id = ? AND status = 'publishing'",
+    )
+    .bind(chrono::Utc::now().timestamp())
+    .bind(post_id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to refresh publishing lock for '{}': {}", post_id, e))?;
+
+    Ok(())
+}
+
+/// Recover posts left in 'publishing' by an interrupted run (crash, forced exit,
+/// killed worker). A lock older than `max_age_secs` is treated as lost: the post
+/// is returned to 'scheduled' so the scheduler retries it immediately, and any
+/// destination still marked 'pending' is marked 'failed' with an explicit reason.
+/// Destinations already 'published' stay untouched, so the duplicate protection
+/// in the scheduler still prevents a second publication.
+/// Returns the number of recovered posts.
+pub async fn recover_stuck_publishing_posts(
+    pool: &SqlitePool,
+    max_age_secs: i64,
+) -> Result<usize, String> {
+    let cutoff = chrono::Utc::now().timestamp() - max_age_secs;
+
+    let stuck: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT id FROM posts
+        WHERE status = 'publishing'
+          AND (publishing_started_at IS NULL OR publishing_started_at <= ?)
+        "#,
+    )
+    .bind(cutoff)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to query stuck publishing posts: {}", e))?;
+
+    for post_id in &stuck {
+        sqlx::query(
+            "UPDATE posts SET status = 'scheduled', publishing_started_at = NULL WHERE id = ? AND status = 'publishing'",
+        )
+        .bind(post_id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to release stuck post '{}': {}", post_id, e))?;
+
+        sqlx::query(
+            r#"
+            UPDATE post_destinations
+            SET status = 'failed', error_log = ?
+            WHERE post_id = ? AND status = 'pending'
+            "#,
+        )
+        .bind("Публикация прервана: приложение было закрыто до завершения")
+        .bind(post_id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to mark interrupted destinations for '{}': {}", post_id, e))?;
+    }
+
+    Ok(stuck.len())
 }
 
 /// Update post status (e.g. to 'published', 'failed', 'publishing', 'partially_published')
@@ -638,10 +728,12 @@ pub async fn update_post_status(pool: &SqlitePool, post_id: &str, status: &str) 
     let result = sqlx::query(
         r#"
         UPDATE posts
-        SET status = ?
+        SET status = ?,
+            publishing_started_at = CASE WHEN ? = 'publishing' THEN publishing_started_at ELSE NULL END
         WHERE id = ?
         "#,
     )
+    .bind(status)
     .bind(status)
     .bind(post_id)
     .execute(pool)
@@ -749,12 +841,14 @@ pub async fn retry_post(pool: &SqlitePool, post_id: &str) -> Result<(), String> 
     let now = chrono::Utc::now().timestamp();
 
     // 1. Reset post status to scheduled for immediate processing
-    sqlx::query("UPDATE posts SET status = 'scheduled', scheduled_for = ? WHERE id = ?")
-        .bind(now)
-        .bind(post_id)
-        .execute(pool)
-        .await
-        .map_err(|e| format!("Failed to reset post status for retry: {}", e))?;
+    sqlx::query(
+        "UPDATE posts SET status = 'scheduled', scheduled_for = ?, publishing_started_at = NULL WHERE id = ?",
+    )
+    .bind(now)
+    .bind(post_id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to reset post status for retry: {}", e))?;
 
     // 2. Reset failed destinations to pending and clear error_log
     sqlx::query("UPDATE post_destinations SET status = 'pending', error_log = NULL WHERE post_id = ? AND status = 'failed'")

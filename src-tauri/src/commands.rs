@@ -468,6 +468,7 @@ pub async fn vk_resolve_target(token: String, query: String) -> Result<serde_jso
 /// Parse community subscribers with the browser worker and store new contacts.
 #[tauri::command]
 pub async fn parse_audience(
+    app: tauri::AppHandle,
     state: State<'_, DbState>,
     account_id: String,
     query: String,
@@ -488,11 +489,13 @@ pub async fn parse_audience(
     let limit_value = limit.unwrap_or(50).min(300);
 
     let resp = tokio::task::spawn_blocking(move || {
-        crate::browser_worker::browser_action(
+        crate::browser_worker::browser_action_with_timeout(
+            Some(&app),
             acc_id,
             platform,
             "parse_members".to_string(),
             Some(serde_json::json!({ "query": query_for_worker, "limit": limit_value })),
+            std::time::Duration::from_secs(360),
         )
     })
     .await
@@ -587,6 +590,7 @@ pub async fn delete_audience_contact(
 /// Runs slowly (human-like delays) and may take minutes for a batch.
 #[tauri::command]
 pub async fn send_friend_requests(
+    app: tauri::AppHandle,
     state: State<'_, DbState>,
     account_id: String,
     limit: Option<u32>,
@@ -618,6 +622,7 @@ pub async fn send_friend_requests(
 
     let resp = tokio::task::spawn_blocking(move || {
         crate::browser_worker::browser_action_with_timeout(
+            Some(&app),
             acc_id,
             platform,
             "friend_requests".to_string(),

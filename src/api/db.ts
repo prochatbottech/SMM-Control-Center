@@ -707,6 +707,25 @@ export async function browserResolveTarget(
   return { targetId: res.targetId, targetTitle: res.targetTitle || res.targetId };
 }
 
+/**
+ * Diagnostics for the browser automation runtime (Node, Playwright, worker script).
+ * The backend performs a real worker round-trip, so `ok: true` means posting will work.
+ */
+export interface BrowserRuntimeDiagnostics {
+  ok: boolean;
+  source: string;
+  script: string | null;
+  playwright_module: string | null;
+  node: string | null;
+  node_version: string | null;
+  profiles_dir: string | null;
+  issues: string[];
+}
+
+export async function getBrowserRuntimeStatus(): Promise<BrowserRuntimeDiagnostics> {
+  return await safeInvoke<BrowserRuntimeDiagnostics>('browser_runtime_status');
+}
+
 // ============================================================================
 // Audience contacts (parsed via browser automation)
 // ============================================================================

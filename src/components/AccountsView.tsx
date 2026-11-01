@@ -3,6 +3,7 @@ import { Plus, RefreshCw, Shield, Sparkles } from 'lucide-react';
 import { useAccountsQuery } from '../hooks/useAccounts';
 import { AccountList } from './AccountList';
 import { AddAccountModal } from './AddAccountModal';
+import { BrowserRuntimeBanner } from './BrowserRuntimeBanner';
 
 export const AccountsView: React.FC = () => {
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -65,6 +66,9 @@ export const AccountsView: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Browser automation runtime readiness */}
+      <BrowserRuntimeBanner />
 
       {/* Account List Grid / Empty State */}
       <AccountList

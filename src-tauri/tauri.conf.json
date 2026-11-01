@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "pnpm prepare:automation && pnpm build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -50,6 +50,9 @@
     "active": true,
     "targets": ["nsis", "appimage", "deb"],
     "createUpdaterArtifacts": false,
+    "resources": {
+      "resources/automation/": "automation/"
+    },
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper"

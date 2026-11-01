@@ -7,9 +7,10 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "prepare:automation": "node scripts/prepare-automation.mjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "pnpm build && tauri build"
+    "tauri:build": "pnpm prepare:automation && pnpm build && tauri build"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",

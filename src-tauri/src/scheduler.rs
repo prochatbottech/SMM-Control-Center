@@ -9,6 +9,34 @@ use crate::worker_status;
 
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
+/// A post locked for publishing longer than this is considered abandoned.
+/// Must stay above the browser publishing timeout (360s) so a live publication
+/// is never released while the worker is still driving the browser.
+pub const STUCK_PUBLISHING_MAX_AGE_SECS: i64 = 900;
+
+/// Release posts left in 'publishing' by a previous run. Called once at startup
+/// and on every scheduler iteration so a crash mid-publication cannot strand a
+/// post forever.
+pub async fn recover_stuck_posts(
+    app: Option<&tauri::AppHandle>,
+    pool: &SqlitePool,
+) -> Result<usize, String> {
+    let recovered = db::recover_stuck_publishing_posts(pool, STUCK_PUBLISHING_MAX_AGE_SECS).await?;
+
+    if recovered > 0 {
+        logger::emit_log_opt(
+            app,
+            "warn",
+            &format!(
+                "Восстановлено {} пост(ов), зависших в статусе 'publishing' — они будут отправлены повторно",
+                recovered
+            ),
+        );
+    }
+
+    Ok(recovered)
+}
+
 /// Run one iteration of processing all due scheduled posts.
 /// Returns the number of successfully published posts.
 /// Accepts optional AppHandle to emit live system events to the frontend.
@@ -88,6 +116,10 @@ pub async fn process_due_posts<P: PostPublisher>(
         let destinations = db::get_post_destinations(pool, &post.id).await?;
 
         for dest in destinations {
+            // Keep the lock alive: a post with several accounts can stay in
+            // 'publishing' far longer than the recovery threshold.
+            db::touch_publishing_lock(pool, &post.id).await?;
+
             if dest.status == "published" {
                 logger::emit_log_opt(
                     app,
@@ -176,8 +208,10 @@ pub async fn process_due_posts<P: PostPublisher>(
                 let content = post.content.clone();
                 let media = post.media_urls.clone();
                 let target = account.target_id.clone().unwrap_or_default();
+                let app_for_browser = app.cloned();
                 tokio::task::spawn_blocking(move || {
                     crate::browser_worker::post(
+                        app_for_browser.as_ref(),
                         &acc_id,
                         &platform,
                         &content,
@@ -307,6 +341,14 @@ pub fn start_worker(app: tauri::AppHandle, pool: SqlitePool) {
         );
 
         loop {
+            if let Err(e) = recover_stuck_posts(Some(&app), &pool).await {
+                logger::emit_log(
+                    &app,
+                    "error",
+                    &format!("Ошибка восстановления зависших постов: {}", e),
+                );
+            }
+
             match process_due_posts(Some(&app), &pool, &publisher, None).await {
                 Ok(count) => worker_status::scheduler_record_iteration(count),
                 Err(e) => {
