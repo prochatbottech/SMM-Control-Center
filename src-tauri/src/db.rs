@@ -19,6 +19,7 @@ pub const MIGRATION_05_SQL: &str = include_str!("../migrations/05_post_format.sq
 pub const MIGRATION_06_SQL: &str = include_str!("../migrations/06_account_target.sql");
 pub const MIGRATION_07_SQL: &str = include_str!("../migrations/07_audience.sql");
 pub const MIGRATION_08_SQL: &str = include_str!("../migrations/08_publishing_started_at.sql");
+pub const MIGRATION_09_SQL: &str = include_str!("../migrations/09_behavior_log.sql");
 pub const INITIAL_MIGRATION_SQL: &str = MIGRATION_01_SQL;
 
 /// Holds the SQLite connection pool as Tauri managed state
@@ -259,6 +260,24 @@ pub async fn apply_migrations(pool: &SqlitePool) -> Result<(), String> {
             .execute(pool)
             .await
             .map_err(|e| format!("Failed to record migration 08: {}", e))?;
+    }
+
+    // Migration 09 (behavior log for daily quotas and pacing)
+    if !applied_versions.contains(&9) {
+        for statement in MIGRATION_09_SQL.split(';') {
+            let trimmed = statement.trim();
+            if !trimmed.is_empty() {
+                sqlx::query(trimmed)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| format!("Migration 09 statement failed ({}): {}", trimmed, e))?;
+            }
+        }
+        sqlx::query("INSERT INTO _schema_migrations (version, applied_at) VALUES (9, ?)")
+            .bind(chrono::Utc::now().timestamp())
+            .execute(pool)
+            .await
+            .map_err(|e| format!("Failed to record migration 09: {}", e))?;
     }
 
     Ok(())

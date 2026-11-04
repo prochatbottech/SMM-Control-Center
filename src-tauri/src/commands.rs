@@ -482,6 +482,12 @@ pub async fn parse_audience(
         return Err("Аудиторию можно парсить только для браузерных аккаунтов".to_string());
     }
 
+    // Parsing is read-only but still costs requests: gate it by the daily budget
+    // and keep the same pacing as risky actions, so a parse run does not make the
+    // account's rhythm machine-like for the actions that follow.
+    crate::behavior::ensure_quota(&state.pool, &account_id, "parse_members").await?;
+    crate::behavior::pace(&state.pool, &account_id).await?;
+
     let platform = account.platform.clone();
     let platform_for_save = platform.clone();
     let acc_id = account.id.clone();
@@ -548,12 +554,16 @@ pub async fn parse_audience(
     )
     .await?;
 
+    // Only a run that actually produced contacts consumes the budget.
+    crate::behavior::record(&state.pool, &account_id, "parse_members", Some(&query)).await?;
+
     let contacts = db::get_audience_contacts(&state.pool, Some(&account_id)).await?;
 
     Ok(serde_json::json!({
         "parsed": members.len(),
         "inserted": inserted,
         "contacts": contacts,
+        "quota_left": crate::behavior::remaining_today(&state.pool, &account_id, "parse_members").await?,
     }))
 }
 
@@ -603,7 +613,21 @@ pub async fn send_friend_requests(
         return Err("Заявки через браузер доступны только для браузерных аккаунтов".to_string());
     }
 
-    let batch_limit = limit.unwrap_or(5).clamp(1, 15);
+    // Friend requests are the most "bot-shaped" action VK scores, so the batch is
+    // capped by what is left of today's budget rather than by the requested limit.
+    let remaining = crate::behavior::remaining_today(&state.pool, &account_id, "friend_request").await?;
+    if remaining <= 0 {
+        return Err(format!(
+            "Дневной лимит «{}» исчерпан. Продолжите завтра — это главный фактор, из-за \
+             которого аккаунты получают ограничения.",
+            crate::behavior::human_action("friend_request")
+        ));
+    }
+
+    let requested = limit.unwrap_or(5).clamp(1, 15) as i64;
+    let batch_limit = requested.min(remaining);
+    crate::behavior::pace(&state.pool, &account_id).await?;
+
     let contacts = db::get_audience_contacts(&state.pool, Some(&account_id)).await?;
     let pending: Vec<models::AudienceContact> = contacts
         .into_iter()
@@ -618,7 +642,9 @@ pub async fn send_friend_requests(
     let hrefs: Vec<String> = pending.iter().map(|c| c.profile_href.clone()).collect();
     let platform = account.platform.clone();
     let acc_id = account.id.clone();
-    let timeout = std::time::Duration::from_secs(hrefs.len() as u64 * 130 + 180);
+    // The worker pauses 2-6 minutes between requests, so budget ~7 minutes per
+    // contact plus page time; a too-short timeout would kill a legitimate batch.
+    let timeout = std::time::Duration::from_secs(hrefs.len() as u64 * 420 + 300);
 
     let resp = tokio::task::spawn_blocking(move || {
         crate::browser_worker::browser_action_with_timeout(
@@ -682,13 +708,39 @@ pub async fn send_friend_requests(
         }
     }
 
+    // Each accepted request consumes one slot of the daily budget; `already_requested`
+    // is also logged because the visit itself was observed by VK.
+    for result in &results {
+        let status = result.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        if matches!(status, "sent" | "sent_unconfirmed" | "already_requested") {
+            crate::behavior::record(
+                &state.pool,
+                &account_id,
+                "friend_request",
+                result.get("href").and_then(|v| v.as_str()),
+            )
+            .await?;
+        }
+    }
+
     Ok(serde_json::json!({
         "requested": sent,
         "skipped": skipped,
         "total": results.len(),
+        "quota_left": crate::behavior::remaining_today(&state.pool, &account_id, "friend_request").await?,
         "details": results,
     }))
-}/// Get a valid VK access token for an account (decrypt stored creds + refresh if
+}/// Daily quota usage for one account, shown in the UI before the user starts a batch.
+#[tauri::command]
+pub async fn get_behavior_quota(
+    state: State<'_, DbState>,
+    account_id: String,
+) -> Result<JsonValue, String> {
+    let report = crate::behavior::quota_report(&state.pool, &account_id).await?;
+    serde_json::to_value(&report).map_err(|e| format!("Serialization error: {}", e))
+}
+
+/// Get a valid VK access token for an account (decrypt stored creds + refresh if
 /// expired). Persists refreshed creds back to the account.
 async fn vk_account_access(
     pool: &sqlx::SqlitePool,

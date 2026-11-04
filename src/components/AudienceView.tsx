@@ -4,7 +4,9 @@ import { UserPlus, Loader2, Trash2, ExternalLink, Users, AlertTriangle } from 'l
 import { toast } from 'sonner';
 import {
   AudienceContact,
+  BehaviorQuota,
   deleteAudienceContact,
+  getBehaviorQuota,
   listAudience,
   parseAudience,
   sendFriendRequests,
@@ -13,6 +15,7 @@ import { useAccountsQuery } from '../hooks/useAccounts';
 import { ConfirmDialog } from './ConfirmDialog';
 
 const AUDIENCE_QUERY_KEY = ['audience'] as const;
+const QUOTA_QUERY_KEY = ['behavior-quota'] as const;
 
 const STATUS_LABEL: Record<string, string> = {
   new: 'Новый',
@@ -54,6 +57,16 @@ export function AudienceView() {
     queryFn: async () => await listAudience(effectiveAccountId || null),
   });
 
+  // Daily budget for the selected account: shown before the user starts a batch
+  // so an exhausted quota is visible instead of surfacing as an error.
+  const { data: quotas } = useQuery<BehaviorQuota[], Error>({
+    queryKey: [...QUOTA_QUERY_KEY, effectiveAccountId],
+    queryFn: async () => await getBehaviorQuota(effectiveAccountId),
+    enabled: !!effectiveAccountId,
+  });
+
+  const quotaFor = (action: string) => quotas?.find((q) => q.action === action);
+
   const stats = useMemo(() => {
     const list = contacts ?? [];
     return {
@@ -78,6 +91,7 @@ export function AudienceView() {
     try {
       const res = await parseAudience(effectiveAccountId, query.trim(), limit);
       await queryClient.invalidateQueries({ queryKey: AUDIENCE_QUERY_KEY });
+      await queryClient.invalidateQueries({ queryKey: QUOTA_QUERY_KEY });
       toast.success(
         `Найдено ${res.parsed}, новых контактов: ${res.inserted}`
       );
@@ -95,9 +109,9 @@ export function AudienceView() {
     try {
       const res = await sendFriendRequests(effectiveAccountId, friendLimit);
       await queryClient.invalidateQueries({ queryKey: AUDIENCE_QUERY_KEY });
-      toast.success(
-        `Заявок отправлено: ${res.requested}, пропущено: ${res.skipped} (из ${res.total})`
-      );
+      await queryClient.invalidateQueries({ queryKey: QUOTA_QUERY_KEY });
+      const left = res.quota_left != null ? `, осталось на сегодня: ${res.quota_left}` : '';
+      toast.success(`Заявок отправлено: ${res.requested}, пропущено: ${res.skipped} (из ${res.total})${left}`);
     } catch (err: any) {
       const msg = typeof err === 'string' ? err : err?.message || String(err);
       toast.error(`Ошибка отправки заявок: ${msg}`);
@@ -226,9 +240,15 @@ export function AudienceView() {
         <div className="text-sm text-zinc-600 dark:text-zinc-300">
           <div className="font-medium text-zinc-800 dark:text-zinc-100">
             Заявки в друзья
+            {quotaFor('friend_request') && (
+              <span className="ml-2 text-xs font-normal text-zinc-500 dark:text-zinc-400">
+                сегодня{' '}
+                {quotaFor('friend_request')!.used} / {quotaFor('friend_request')!.limit}
+              </span>
+            )}
           </div>
           <div className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-            По одной, с паузами 45–95 секунд. Новых контактов: {stats.fresh}
+            По одной, с паузами 2–6 минут. Новых контактов: {stats.fresh}
           </div>
         </div>
 
@@ -248,7 +268,12 @@ export function AudienceView() {
           </div>
           <button
             onClick={() => setConfirmFriends(true)}
-            disabled={isSending || stats.fresh === 0 || !effectiveAccountId}
+            disabled={
+              isSending ||
+              stats.fresh === 0 ||
+              !effectiveAccountId ||
+              (quotaFor('friend_request')?.limit ?? 1) - (quotaFor('friend_request')?.used ?? 0) <= 0
+            }
             className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition-colors disabled:opacity-50"
           >
             {isSending ? (
@@ -269,7 +294,7 @@ export function AudienceView() {
       <ConfirmDialog
         open={confirmFriends}
         title="Отправить заявки в друзья?"
-        description={`Будет отправлено до ${friendLimit} заявок с паузами 45–95 секунд (несколько минут). Массовые заявки могут привести к ограничению аккаунта VK.`}
+        description={`Будет отправлено до ${friendLimit} заявок с паузами 2–6 минут между ними — батч займёт столько же. Не закрывайте окно браузера и не пользуйтесь им в это время. Массовые заявки могут привести к ограничению аккаунта VK.`}
         isPending={isSending}
         onConfirm={handleSendFriends}
         onCancel={() => setConfirmFriends(false)}

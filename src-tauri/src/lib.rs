@@ -1,6 +1,7 @@
 pub mod analytics;
 pub mod automation_worker;
 pub mod backup;
+pub mod behavior;
 pub mod commands;
 pub mod crm;
 pub mod crm_connectors;
@@ -178,11 +179,13 @@ pub fn run() {
             browser_worker::browser_login_status,
             browser_worker::browser_action,
             browser_worker::browser_runtime_status,
+            browser_worker::browser_reconnect,
             commands::parse_audience,
             commands::list_audience,
             commands::set_audience_status,
             commands::delete_audience_contact,
             commands::send_friend_requests,
+            commands::get_behavior_quota,
             commands::create_post,
             commands::get_posts,
             commands::delete_post,

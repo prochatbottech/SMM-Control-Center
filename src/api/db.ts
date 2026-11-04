@@ -708,7 +708,7 @@ export async function browserResolveTarget(
 }
 
 /**
- * Diagnostics for the browser automation runtime (Node, Playwright, worker script).
+ * Diagnostics for the browser automation runtime (Node, Playwright, worker script, CDP).
  * The backend performs a real worker round-trip, so `ok: true` means posting will work.
  */
 export interface BrowserRuntimeDiagnostics {
@@ -718,12 +718,20 @@ export interface BrowserRuntimeDiagnostics {
   playwright_module: string | null;
   node: string | null;
   node_version: string | null;
+  cdp_url: string;
+  cdp_reachable: boolean;
+  browser_connected: boolean;
+  browser_pages: number | null;
   profiles_dir: string | null;
   issues: string[];
 }
 
 export async function getBrowserRuntimeStatus(): Promise<BrowserRuntimeDiagnostics> {
   return await safeInvoke<BrowserRuntimeDiagnostics>('browser_runtime_status');
+}
+
+export async function browserReconnect(): Promise<BrowserRuntimeDiagnostics> {
+  return await safeInvoke<BrowserRuntimeDiagnostics>('browser_reconnect');
 }
 
 // ============================================================================
@@ -774,11 +782,25 @@ export async function deleteAudienceContact(id: string): Promise<boolean> {
 export async function sendFriendRequests(
   accountId: string,
   limit?: number
-): Promise<{ requested: number; skipped: number; total: number }> {
-  return await safeInvoke<{ requested: number; skipped: number; total: number }>(
+): Promise<{ requested: number; skipped: number; total: number; quota_left?: number }> {
+  return await safeInvoke<{ requested: number; skipped: number; total: number; quota_left?: number }>(
     'send_friend_requests',
     { accountId, limit: limit ?? 5 }
   );
+}
+
+/**
+ * Daily quota usage for a browser account.
+ */
+export interface BehaviorQuota {
+  action: string;
+  label: string;
+  used: number;
+  limit: number;
+}
+
+export async function getBehaviorQuota(accountId: string): Promise<BehaviorQuota[]> {
+  return await safeInvoke<BehaviorQuota[]>('get_behavior_quota', { accountId });
 }
 
 

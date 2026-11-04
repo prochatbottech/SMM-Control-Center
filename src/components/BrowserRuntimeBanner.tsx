@@ -2,9 +2,10 @@ import { AlertTriangle, CheckCircle2, RefreshCw, Terminal } from 'lucide-react';
 import { useBrowserRuntimeQuery } from '../hooks/useBrowserRuntime';
 
 /**
- * Surfaces the state of the Playwright runtime (Node + Playwright + worker script).
- * A packaged build without the runtime would otherwise fail only when the user
- * tries to post, so the problem is reported up-front with an actionable hint.
+ * Surfaces the state of the CDP-based automation chain: Node + Playwright +
+ * worker script + the dedicated Yandex Browser profile listening on the CDP port.
+ * A missing browser profile is the most common failure and gets its own,
+ * actionable message — the user only has to run the launch script and log in.
  */
 export function BrowserRuntimeBanner() {
   const { data, isLoading, isError, error, refetch, isFetching } = useBrowserRuntimeQuery();
@@ -13,7 +14,7 @@ export function BrowserRuntimeBanner() {
     return (
       <div className="flex items-center gap-3 px-5 py-3.5 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl text-xs text-zinc-500 dark:text-zinc-400">
         <RefreshCw className="w-4 h-4 animate-spin text-blue-500" />
-        Проверка рантайма браузерной автоматизации...
+        Проверка подключения к браузеру...
       </div>
     );
   }
@@ -45,11 +46,10 @@ export function BrowserRuntimeBanner() {
       <div className="flex items-center gap-3 px-5 py-3.5 bg-emerald-500/10 border border-emerald-500/25 rounded-xl">
         <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
         <div className="text-xs text-emerald-800 dark:text-emerald-300">
-          <span className="font-semibold">Браузерная автоматизация готова.</span>{' '}
+          <span className="font-semibold">Браузер подключён.</span>{' '}
           <span className="text-emerald-700/80 dark:text-emerald-400/80">
-            Node {data.node_version ?? '—'} · Playwright{' '}
-            {data.playwright_module ? 'подключён' : 'не найден'} · источник{' '}
-            <code className="font-mono">{data.source}</code>
+            {data.cdp_url} · вкладок: {data.browser_pages ?? 0} · Node{' '}
+            {data.node_version ?? '—'}
           </span>
         </div>
         <button
@@ -70,7 +70,9 @@ export function BrowserRuntimeBanner() {
         <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
         <div className="text-xs space-y-1">
           <div className="font-bold text-amber-900 dark:text-amber-300">
-            Браузерная автоматизация недоступна
+            {data.cdp_reachable
+              ? 'Браузер отвечает, но автоматизация недоступна'
+              : 'Браузер с выделенным профилем не подключён'}
           </div>
           <div className="text-amber-800 dark:text-amber-200/90">
             Публикация в VK/OK через браузер, парсинг аудитории и заявки не будут работать,
@@ -87,6 +89,18 @@ export function BrowserRuntimeBanner() {
         </button>
       </div>
 
+      {!data.cdp_reachable && (
+        <div className="pl-7 space-y-1.5 text-xs text-amber-900/90 dark:text-amber-200/90">
+          <p>
+            Запустите браузер с выделенным профилем и войдите в него на{' '}
+            <code className="font-mono">vk.com</code> и <code className="font-mono">ok.ru</code>:
+          </p>
+          <pre className="px-3 py-2 bg-zinc-900 text-zinc-100 rounded-lg text-[11px] font-mono overflow-x-auto">
+node scripts/launch-yandex.mjs
+          </pre>
+        </div>
+      )}
+
       <ul className="space-y-1.5 text-xs text-amber-900/90 dark:text-amber-200/90 pl-7">
         {data.issues.map((issue, idx) => (
           <li key={idx} className="flex items-start gap-2">
@@ -97,6 +111,10 @@ export function BrowserRuntimeBanner() {
       </ul>
 
       <div className="pl-7 pt-1 space-y-1 text-[11px] text-zinc-600 dark:text-zinc-400 font-mono break-all">
+        <div className="flex items-start gap-1.5">
+          <Terminal className="w-3 h-3 mt-0.5 shrink-0" />
+          <span>cdp: {data.cdp_url}</span>
+        </div>
         {data.node && (
           <div className="flex items-start gap-1.5">
             <Terminal className="w-3 h-3 mt-0.5 shrink-0" />

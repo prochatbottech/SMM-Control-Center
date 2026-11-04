@@ -1,22 +1,44 @@
-// Browser automation worker (Playwright). Long-lived process driven by the Rust
-// backend over newline-delimited JSON on stdin/stdout.
+// Browser automation worker (Playwright) — CDP-режим.
 //
-// Request:  { "id": number, "cmd": string, ...args }
-// Response: { "id": number, "ok": boolean, "data"?: any, "error"?: string }
+// Подключается к запущенному Яндекс.Браузеру через CDP-порт (по умолчанию
+// http://127.0.0.1:9223) и выполняет действия в его дефолтном контексте.
+//
+// Запуск (из Rust или вручную):
+//   node automation/worker.mjs
+//
+// Переменные окружения:
+//   SMM_CDP_URL          — CDP endpoint (default: http://127.0.0.1:9223)
+//   PLAYWRIGHT_MODULE_PATH — путь к playwright-core (для packaged-сборки)
+//
+// Протокол (newline-delimited JSON на stdin/stdout):
+//   Request:  { "id": number, "cmd": string, ...args }
+//   Response: { "id": number, "ok": boolean, "data"?: any, "error"?: string }
+//
+// Команды:
+//   ping   — проверить, что воркер жив и браузер подключён
+//   action — выполнить действие (post, parse_members, friend_requests и т.п.)
 
-import { join } from 'node:path';
 import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import readline from 'node:readline';
-import { humanPause, humanType, humanClick, humanFill, humanScroll } from './human.js';
+import { humanPause, humanType, humanScroll } from './human.js';
 
-const PROFILES_DIR = process.env.BROWSER_PROFILES_DIR || join(process.cwd(), '.browser_profiles');
-const LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
+// ---Guard against silent crashes: log and keep the process alive---
+process.on('unhandledRejection', (reason) => {
+  console.error('[worker] unhandledRejection:', reason && reason.stack ? reason.stack : reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[worker] uncaughtException:', err && err.stack ? err.stack : err);
+});
 
-// Playwright lives outside this script once packaged: the Rust side passes the
-// absolute package directory so the worker does not depend on the process cwd or
-// on a node_modules tree next to the app resources. A bare directory URL is not
-// importable, so it is resolved to the package entry point first.
+// --- Configuration ---
+
+const CDP_URL = process.env.SMM_CDP_URL || 'http://127.0.0.1:9223';
+const NAV_TIMEOUT_MS = 45_000;
+
+// --- Playwright loader (works both in dev and packaged layout) ---
+
 function moduleEntry(packageDir) {
   for (const entry of ['index.mjs', 'index.js']) {
     const candidate = join(packageDir, entry);
@@ -30,7 +52,6 @@ async function loadChromium() {
   if (process.env.PLAYWRIGHT_MODULE_PATH) {
     const dir = process.env.PLAYWRIGHT_MODULE_PATH;
     const entry = moduleEntry(dir);
-    // Fail loudly instead of silently falling back to a dev-only install.
     if (!entry) {
       throw new Error(
         `PLAYWRIGHT_MODULE_PATH points to "${dir}", but it is not a Playwright package ` +
@@ -63,47 +84,64 @@ async function loadChromium() {
 
 const { chromium, resolvedFrom: PLAYWRIGHT_SOURCE } = await loadChromium();
 
-// Launching order: an explicitly configured channel, then browsers already
-// installed on the machine (Edge ships with Windows, Chrome is common), and only
-// then a Playwright-managed Chromium download.
-const BROWSER_CANDIDATES = [
-  process.env.BROWSER_CHANNEL,
-  'msedge',
-  'chrome',
-  undefined,
-].filter((v, i, arr) => arr.indexOf(v) === i);
+// --- CDP connection (singleton) ---
 
-let selectedBrowser; // cached { label, channel } after the first successful launch
+let browser = null;        // playwright Browser instance
+let defaultContext = null; // the only context available over CDP
 
-function isMissingExecutable(err) {
-  const msg = String(err && err.message ? err.message : err);
-  return /Executable doesn't exist|is not found|Cannot find|ENOENT/i.test(msg);
+/**
+ * Подключается к браузеру через CDP. Повторные вызовы безопасны: при обрыве
+ * соединения (браузер закрыли или перезапустили) следующий вызов подключается заново.
+ */
+async function ensureBrowser() {
+  if (browser && defaultContext) return { browser, context: defaultContext };
+
+  try {
+    browser = await chromium.connectOverCDP(CDP_URL);
+    const contexts = browser.contexts();
+    if (contexts.length === 0) {
+      throw new Error('Браузер подключён, но контекстов нет — перезапустите браузер');
+    }
+    defaultContext = contexts[0]; // over CDP ровно один контекст
+    console.error(`[worker] CDP connected: ${CDP_URL}`);
+
+    browser.on('disconnected', () => {
+      console.error('[worker] CDP disconnected, will reconnect on next request');
+      browser = null;
+      defaultContext = null;
+      automationPage = null;
+    });
+
+    return { browser, context: defaultContext };
+  } catch (err) {
+    const reason = String(err && err.message ? err.message : err);
+    throw new Error(
+      `Не удалось подключиться к браузеру через CDP (${CDP_URL}): ${reason}\n` +
+        'Запустите скрипт: node scripts/launch-yandex.mjs\n' +
+        'Затем войдите в аккаунты VK/OK вручную и повторите.'
+    );
+  }
 }
 
-async function launchPersistentContext(userDataDir, options) {
-  const order = selectedBrowser
-    ? [selectedBrowser]
-    : BROWSER_CANDIDATES.map((channel) => ({ label: channel || 'bundled-chromium', channel }));
+// Вкладка, которую ведёт автоматизация. Переиспользуется между запросами, чтобы
+// не множить табы, но никогда не забирается вкладка, открытая пользователем.
+let automationPage = null;
 
-  const failures = [];
-  for (const candidate of order) {
-    try {
-      const ctx = await chromium.launchPersistentContext(userDataDir, {
-        ...options,
-        ...(candidate.channel ? { channel: candidate.channel } : {}),
-      });
-      selectedBrowser = candidate;
-      return ctx;
-    } catch (err) {
-      failures.push(`${candidate.label}: ${err && err.message ? err.message : String(err)}`);
-      // A missing browser is worth skipping; anything else is a real failure of
-      // this launch and must not be retried with another channel silently.
-      if (!isMissingExecutable(err)) break;
-    }
+/**
+ * Возвращает собственную вкладку автоматизации, создавая её при необходимости.
+ */
+async function getOrCreatePage() {
+  const { context } = await ensureBrowser();
+
+  if (automationPage && !automationPage.isClosed()) {
+    return automationPage;
   }
 
-  throw new Error(`Could not launch a browser.\n  ${failures.join('\n  ')}`);
+  automationPage = await context.newPage();
+  return automationPage;
 }
+
+// --- Helpers ---
 
 function send(obj) {
   process.stdout.write(JSON.stringify(obj) + '\n');
@@ -113,191 +151,22 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-
-function platformConfig(platform) {
-  const visibleText = async (page) =>
-    page
-      .evaluate(() => document.body.innerText.replace(/\s+/g, ' ').slice(0, 1200))
-      .catch(() => '');
-
-  const cfg = {
-    vk: {
-      url: 'https://vk.com/',
-      async loggedIn(page, ctx) {
-        if (/login/i.test(page.url())) return false;
-
-        const cookies = await ctx.cookies();
-        const hasAuth = cookies.some((c) => c.name === 'remixsid' && c.value);
-        if (!hasAuth) return false;
-
-        const txt = await visibleText(page);
-        // Guest pages show login/registration prompts.
-        if (/Войти|Зарегистрироваться/.test(txt)) return false;
-
-        if (/(^|\/)(feed|al_feed)(\?|$)/.test(page.url()) || /vk\.com\/id\d+/.test(page.url())) {
-          return true;
-        }
-        return true;
-      },
-    },
-    ok: {
-      url: 'https://ok.ru/',
-      async loggedIn(page, ctx) {
-        if (/\/feed|st\.cmd=userMain|my\.ok\.ru/i.test(page.url())) return true;
-
-        const cookies = await ctx.cookies();
-        // OK keeps the real session token in AUTHCODE; `remixsid` exists for guests too.
-        const hasAuthCode = cookies.some((c) => c.name === 'AUTHCODE' && c.value);
-
-        const txt = await visibleText(page);
-        const guestMarkers =
-          /Зарегистрироваться|Войти по QR-коду|Телефон или почта|Не получается войти/i.test(txt);
-        if (guestMarkers) return false;
-
-        if (hasAuthCode) return true;
-        // Fallback: authenticated UI markers.
-        return /Что у вас нового|Мои друзья|Сообщения/i.test(txt);
-      },
-    },
-  };
-  return cfg[platform];
+async function gotoVk(page, url, settleMs = 4000) {
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+  await page.waitForTimeout(settleMs);
 }
 
-async function cmdPing() {
-  return {
-    pong: true,
-    node: process.version,
-    playwright: PLAYWRIGHT_SOURCE,
-    browser: selectedBrowser ? selectedBrowser.label : null,
-  };
-}
-
-// Opens a headed persistent-context browser and waits for the user to log in.
-async function cmdLogin(req) {
-  const { accountId, platform } = req;
-  const cfg = platformConfig(platform);
-  if (!cfg) return { error: `unknown platform: ${platform}` };
-
-  const userDataDir = join(PROFILES_DIR, accountId);
-  const ctx = await launchPersistentContext(userDataDir, { headless: false });
-  const page = ctx.pages()[0] || (await ctx.newPage());
-  await page.goto(cfg.url, { waitUntil: 'domcontentloaded' }).catch(() => {});
-
-  const deadline = Date.now() + LOGIN_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    try {
-      if (await cfg.loggedIn(page, ctx)) {
-        await ctx.close();
-        return { ok: true, loggedIn: true };
-      }
-    } catch {
-      // page may be navigating; retry
-    }
-    await sleep(2000);
+function vkChallengeReason(url) {
+  const u = String(url || '');
+  if (/challenge\.html|checkpoint|show_autosubscribe|\/login/i.test(u)) {
+    return (
+      'VK запросил проверку безопасности (антибот). ' +
+      'Откройте браузер, пройдите проверку вручную и повторите'
+    );
   }
-
-  await ctx.close().catch(() => {});
-  return { error: 'login timeout' };
+  return null;
 }
 
-// Headless action using the persisted session.
-async function cmdAction(req) {
-  const { accountId, platform, action, params = {} } = req;
-  const cfg = platformConfig(platform);
-  if (!cfg) return { error: `unknown platform: ${platform}` };
-
-  const userDataDir = join(PROFILES_DIR, accountId);
-  const ctx = await launchPersistentContext(userDataDir, {
-    headless: false,
-    args: ['--window-position=-2400,-2400', '--window-size=1280,900'],
-    viewport: { width: 1280, height: 900 },
-  });
-  const page = ctx.pages()[0] || (await ctx.newPage());
-
-  try {
-    if (action === 'get_url') {
-      await page.goto(cfg.url, { waitUntil: 'domcontentloaded' }).catch(() => {});
-      const url = page.url();
-      const loggedIn = await cfg.loggedIn(page, ctx).catch(() => false);
-      return { url, loggedIn };
-    }
-
-    if (action === 'resolve_target') {
-      if (platform === 'vk') return await resolveVkTarget(page, params.query || '');
-      return { error: `resolve_target not implemented for ${platform}` };
-    }
-
-    if (action === 'parse_members') {
-      if (platform === 'vk') return await parseVkMembers(page, params);
-      return { error: `parse_members not implemented for ${platform}` };
-    }
-
-    if (action === 'friend_requests') {
-      if (platform === 'vk') return await sendVkFriendRequests(page, params);
-      return { error: `friend_requests not implemented for ${platform}` };
-    }
-
-    if (action === 'post') {
-      if (platform === 'vk') return await postVk(page, params);
-      if (platform === 'ok') return await postOk(page, params);
-      return { error: `post not implemented for ${platform}` };
-    }
-
-    return { error: `action not implemented: ${action}` };
-  } finally {
-    await ctx.close().catch(() => {});
-  }
-}
-
-// VK post via the mobile web composer (verified flow):
-// m.vk.com/new_post → span[contenteditable] → «Далее» → «Опубликовать».
-async function postVk(page, params) {
-  const target = String(params.targetId || '').trim();
-  if (target) return await postVkCommunity(page, params, target);
-
-  const { content = '', mediaPaths = [] } = params;
-  try {
-    await page.goto('https://m.vk.com/new_post', { waitUntil: 'load' }).catch(() => {});
-    await page.waitForTimeout(4000);
-
-    if (/login/i.test(page.url())) {
-      return { error: 'not logged in (session expired) — re-login in the browser', url: page.url() };
-    }
-
-    await humanScroll(page, 1).catch(() => {});
-
-    const composer = page.locator('span[contenteditable="true"][role="textbox"]').first();
-    await composer.waitFor({ state: 'visible', timeout: 30000 });
-
-    await composer.click();
-    await humanPause(500, 1200);
-    await humanType(page, content);
-    await humanPause();
-
-    if (mediaPaths.length > 0) {
-      for (const p of mediaPaths) {
-        await page.locator('input[type="file"]').first().setInputFiles(p).catch(() => {});
-        await humanPause(1500, 3000);
-      }
-    }
-
-    const nextBtn = page.getByText('Далее', { exact: true }).first();
-    await nextBtn.waitFor({ state: 'visible', timeout: 20000 });
-    await nextBtn.click({ timeout: 20000 });
-    await humanPause(1500, 3000);
-
-    const publishBtn = page.getByText('Опубликовать', { exact: true }).first();
-    await publishBtn.waitFor({ state: 'visible', timeout: 20000 });
-    await publishBtn.click({ timeout: 20000 });
-    await humanPause(2000, 4000);
-
-    return { ok: true, url: page.url() };
-  } catch (err) {
-    return { error: `${String(err && err.message ? err.message : err)} @ ${page.url()}` };
-  }
-}
-
-// Normalize a community reference: URL / @name / name / id -> bare token.
 function vkNormalize(target) {
   return String(target || '')
     .trim()
@@ -308,7 +177,153 @@ function vkNormalize(target) {
     .replace(/\/+$/, '');
 }
 
-// Resolve a community to "-<gid>" plus its title, in the browser (no API token).
+const VK_NAV = new Set([
+  '/feed', '/im', '/mail', '/friends', '/groups', '/clips', '/audio', '/music',
+  '/video', '/videos', '/services', '/market', '/orders', '/bookmarks', '/docs',
+  '/files', '/games', '/apps', '/search', '/settings', '/help', '/support', '/pay',
+  '/store', '/notes', '/calls', '/reactions', '/ads', '/vk', '/',
+]);
+
+// --- Command handlers ---
+
+async function cmdPing() {
+  try {
+    const { browser, context } = await ensureBrowser();
+    const pages = context.pages();
+    return {
+      pong: true,
+      node: process.version,
+      playwright: PLAYWRIGHT_SOURCE,
+      cdpUrl: CDP_URL,
+      connected: true,
+      openPages: pages.length,
+    };
+  } catch (err) {
+    return {
+      pong: true,
+      node: process.version,
+      playwright: PLAYWRIGHT_SOURCE,
+      cdpUrl: CDP_URL,
+      connected: false,
+      error: String(err && err.message ? err.message : err),
+    };
+  }
+}
+
+// Проверка авторизации в VK/OK (браузер должен быть запущен и залогинен).
+async function cmdCheckAuth(platform) {
+  const cfg = {
+    vk: { url: 'https://vk.com/', check: (page, ctx) => checkVkAuth(page, ctx) },
+    ok:  { url: 'https://ok.ru/',  check: (page, ctx) => checkOkAuth(page, ctx) },
+  }[platform];
+  if (!cfg) return { error: `unknown platform: ${platform}` };
+
+  const page = await getOrCreatePage();
+  await page.goto(cfg.url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS }).catch(() => {});
+  await page.waitForTimeout(3000);
+
+  const { context } = await ensureBrowser();
+  const result = await cfg.check(page, context).catch(() => ({ loggedIn: false }));
+  return result;
+}
+
+async function checkVkAuth(page, ctx) {
+  const url = page.url();
+  if (/login|challenge/i.test(url)) return { loggedIn: false, reason: 'redirected to login/challenge', url };
+
+  const cookies = await ctx.cookies();
+  const hasAuth = cookies.some((c) => c.name === 'remixsid' && c.value);
+  if (!hasAuth) return { loggedIn: false, reason: 'no remixsid cookie', url };
+
+  const txt = await page.evaluate(() => document.body.innerText.replace(/\s+/g, ' ').slice(0, 1200)).catch(() => '');
+  if (/Войти|Зарегистрироваться/.test(txt)) return { loggedIn: false, reason: 'guest UI detected', url };
+
+  return { loggedIn: true, url };
+}
+
+async function checkOkAuth(page, ctx) {
+  const url = page.url();
+  if (/\/feed|st\.cmd=userMain|my\.ok\.ru/i.test(url)) return { loggedIn: true, url };
+
+  const cookies = await ctx.cookies();
+  const hasAuthCode = cookies.some((c) => c.name === 'AUTHCODE' && c.value);
+
+  const txt = await page.evaluate(() => document.body.innerText.replace(/\s+/g, ' ').slice(0, 1200)).catch(() => '');
+  const guestMarkers = /Зарегистрироваться|Войти по QR-коду|Телефон или почта/i.test(txt);
+  if (guestMarkers) return { loggedIn: false, reason: 'guest UI detected', url };
+
+  if (hasAuthCode) return { loggedIn: true, url };
+  return { loggedIn: /Что у вас нового|Мои друзья|Сообщения/i.test(txt), url };
+}
+
+// Единая точка входа для всех действий.
+//
+// Перед каждой задачей вкладка сбрасывается на about:blank: предыдущая задача
+// могла оставить открытую модалку или чужую страницу, и работа с таким состоянием
+// приводит к кликам «не туда». Сбрасывается только собственная вкладка
+// автоматизации — вкладки пользователя не затрагиваются.
+async function resetAutomationPage(page) {
+  try {
+    if (page.url() !== 'about:blank') {
+      await page.goto('about:blank', { timeout: 10000 });
+    }
+  } catch {
+    // A stuck page is recreated on the next request rather than failing the task.
+    automationPage = null;
+  }
+}
+
+async function cmdAction(req) {
+  const { action, params = {} } = req;
+  const page = await getOrCreatePage();
+
+  // Read-only probes must not disturb the page the user may be looking at, and
+  // they do not depend on a clean state.
+  const needsCleanState = ['post', 'parse_members', 'friend_requests', 'resolve_target'].includes(action);
+  if (needsCleanState) await resetAutomationPage(page);
+
+  if (action === 'get_url') {
+    const platform = req.platform || 'vk';
+    const url = platform === 'ok' ? 'https://ok.ru/' : 'https://vk.com/';
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS }).catch(() => {});
+    const pageUrl = page.url();
+    const { context } = await ensureBrowser();
+    const loggedIn = platform === 'ok'
+      ? await checkOkAuth(page, context).then(r => r.loggedIn)
+      : await checkVkAuth(page, context).then(r => r.loggedIn);
+    return { url: pageUrl, loggedIn };
+  }
+
+  if (action === 'check_auth') {
+    return await cmdCheckAuth(req.platform || 'vk');
+  }
+
+  if (action === 'resolve_target') {
+    if (req.platform === 'vk') return await resolveVkTarget(page, params.query || '');
+    return { error: `resolve_target not implemented for ${req.platform}` };
+  }
+
+  if (action === 'parse_members') {
+    if (req.platform === 'vk') return await parseVkMembers(page, params);
+    return { error: `parse_members not implemented for ${req.platform}` };
+  }
+
+  if (action === 'friend_requests') {
+    if (req.platform === 'vk') return await sendVkFriendRequests(page, params);
+    return { error: `friend_requests not implemented for ${req.platform}` };
+  }
+
+  if (action === 'post') {
+    if (req.platform === 'vk') return await postVk(page, params);
+    if (req.platform === 'ok') return await postOk(page, params);
+    return { error: `post not implemented for ${req.platform}` };
+  }
+
+  return { error: `action not implemented: ${action}` };
+}
+
+// --- VK-specific functions ---
+
 async function resolveVkTarget(page, query) {
   const q = vkNormalize(query);
   if (!q) return { error: 'empty community reference' };
@@ -318,12 +333,10 @@ async function resolveVkTarget(page, query) {
     return { targetId: `-${gid}`, targetTitle: `Сообщество ${gid}` };
   }
 
-  await page.goto(`https://vk.com/${encodeURIComponent(q)}`, { waitUntil: 'load' }).catch(() => {});
-  await page.waitForTimeout(4500);
+  await gotoVk(page, `https://vk.com/${encodeURIComponent(q)}`, 4500);
 
-  if (/login/i.test(page.url())) {
-    return { error: 'not logged in (session expired) — re-login in the browser', url: page.url() };
-  }
+  const challenge = vkChallengeReason(page.url());
+  if (challenge) return { error: challenge, url: page.url() };
 
   const html = await page.content().catch(() => '');
   const mostFrequent = (ids) => {
@@ -336,13 +349,11 @@ async function resolveVkTarget(page, query) {
   const gid = mostFrequent(groupKeys) || mostFrequent(wallIds);
   if (!gid) return { error: `community not found: ${q}`, url: page.url() };
 
-  const rawTitle = await page
-    .evaluate(() => {
-      const og = document.querySelector('meta[property="og:title"]');
-      if (og && og.getAttribute('content')) return og.getAttribute('content');
-      return document.title || '';
-    })
-    .catch(() => '');
+  const rawTitle = await page.evaluate(() => {
+    const og = document.querySelector('meta[property="og:title"]');
+    if (og && og.getAttribute('content')) return og.getAttribute('content');
+    return document.title || '';
+  }).catch(() => '');
 
   const title = String(rawTitle)
     .replace(/\s*[|—]\s*ВКонтакте\s*$/i, '')
@@ -352,51 +363,15 @@ async function resolveVkTarget(page, query) {
   return { targetId: `-${gid}`, targetTitle: title || `Сообщество ${gid}`, screenName: q };
 }
 
-// Non-profile links found in the mobile VK nav (excluded from parsing).
-const VK_NAV = new Set([
-  '/feed',
-  '/im',
-  '/mail',
-  '/friends',
-  '/groups',
-  '/clips',
-  '/audio',
-  '/music',
-  '/video',
-  '/videos',
-  '/services',
-  '/market',
-  '/orders',
-  '/bookmarks',
-  '/docs',
-  '/files',
-  '/games',
-  '/apps',
-  '/search',
-  '/settings',
-  '/help',
-  '/support',
-  '/pay',
-  '/store',
-  '/notes',
-  '/calls',
-  '/reactions',
-  '/ads',
-  '/vk',
-  '/',
-]);
-
-function isVkProfileHref(href) {
-  if (!href || VK_NAV.has(href)) return false;
-  if (!/^\/[A-Za-z0-9_.]{2,32}$/.test(href)) return false;
-  // Media/utility namespaces that are not user profiles.
-  if (/^\/(photos|audios|videos|albums|board|topic|wall|away|login|join|share|dev|faq|about)/.test(href)) {
-    return false;
-  }
-  return true;
-}
-
-// Parse community subscribers from the mobile members page.
+// Парсинг подписчиков сообщества через клик по счётчику (десктопный VK).
+//
+// Модалка подписчиков — это <div role="dialog" aria-modal="true"> с бесконечным
+// скроллом. Селекторы VK меняются, поэтому используем структурный подход:
+// 1) кликаем по ссылке, содержащей "подписчик" или "?act=members"
+// 2) ждём появления модалки с role="dialog"
+// 3) скроллим контейнер внутри модалки, собирая ссылки на профили
+//
+// Ссылки на профили в VK имеют вид /id12345 или /username.
 async function parseVkMembers(page, params) {
   const q = vkNormalize(params.query || params.targetId || '');
   const limit = Math.min(Math.max(Number(params.limit) || 50, 1), 300);
@@ -404,86 +379,189 @@ async function parseVkMembers(page, params) {
 
   const name = q.replace(/^-/, '').replace(/^(club|public)/, '');
   try {
-    await page.goto(`https://m.vk.com/${encodeURIComponent(name)}?act=members`, {
-      waitUntil: 'load',
-    });
-    await page.waitForTimeout(4000);
+    await gotoVk(page, `https://vk.com/${encodeURIComponent(name)}`, 5000);
 
-    if (/login/i.test(page.url())) {
-      return { error: 'not logged in (session expired) — re-login in the browser', url: page.url() };
+    const challenge = vkChallengeReason(page.url());
+    if (challenge) return { error: challenge, url: page.url() };
+
+    // --- Шаг 1: открываем модалку подписчиков ---
+
+    // VK показывает счётчик в виде ссылки с текстом типа "1 880 подписчиков"
+    // или "1.2K подписчиков". Ищем любую ссылку, содержащую эти слова.
+    const subscriberLink = page.locator('a:has-text("подписчик")').first();
+    const isSubscriber = await subscriberLink.isVisible({ timeout: 15000 }).catch(() => false);
+
+    if (isSubscriber) {
+      // Проверяем, что это именно счётчик подписчиков, а не что-то другое.
+      const text = await subscriberLink.textContent().catch(() => '');
+      if (/подписчик/i.test(text)) {
+        await subscriberLink.click({ timeout: 10000 }).catch(() => {});
+        // Модалка появляется с анимацией, даём ей отрисоваться.
+        await page.waitForTimeout(2500);
+      }
     }
 
-    const collect = () =>
-      page.evaluate(
-        ({ navArr }) => {
-          const nav = new Set(navArr);
-          const anchors = Array.from(document.querySelectorAll('a[href]'));
-          const rows = [];
-          let own = '';
-          for (const a of anchors) {
-            const href = a.getAttribute('href') || '';
-            const text = (a.textContent || '').trim().replace(/\s+/g, ' ');
-            if (!text) continue;
-            if (!/^\/[A-Za-z0-9_.]{2,32}$/.test(href)) continue;
-            if (nav.has(href)) continue;
-            if (
-              /^\/(photos|audios|videos|albums|board|topic|wall|away|login|join|share|dev|faq|about)/.test(
-                href
-              )
-            ) {
-              continue;
-            }
-            // The first profile-ish link in the mobile nav is the logged-in user.
-            if (!own) own = href;
-            rows.push({ href, name: text.slice(0, 80) });
-          }
-          return { own, rows };
-        },
-        { navArr: Array.from(VK_NAV) }
-      );
+    // Проверяем, открылась ли модалка (VK использует aria-modal="true").
+    const modal = page.locator('div[aria-modal="true"], dialog[role="dialog"]').first();
+    const modalVisible = await modal.isVisible({ timeout: 10000 }).catch(() => false);
 
-    const seen = new Map();
-    let own = '';
-    let stagnant = 0;
-    let prev = 0;
+    if (!modalVisible) {
+      // Альтернативный путь: если модалка не открылась, пробуем перейти на
+      // мобильную версию — она стабильнее показывает список участников.
+      await gotoVk(page, `https://m.vk.com/${encodeURIComponent(name)}?act=members`, 6000);
 
-    for (let i = 0; i < 20 && seen.size < limit; i++) {
-      const { own: ownHref, rows } = await collect();
-      if (ownHref) own = ownHref;
-
-      for (const r of rows) {
-        if (r.href === own) continue;
-        if (!seen.has(r.href)) seen.set(r.href, r);
-        if (seen.size >= limit) break;
+      if (/login|challenge/i.test(page.url())) {
+        return { error: `Не удалось получить список участников (URL: ${page.url()})` };
       }
 
-      if (seen.size === prev) stagnant += 1;
-      else stagnant = 0;
-      prev = seen.size;
-
-      if (stagnant >= 2) break;
-      await humanScroll(page, 1).catch(() => {});
-      await humanPause(1200, 2600);
+      // На мобильной версии участники — это ссылки вида /id123 или /username
+      // в блоке с классами .section > .page_row.
+      return await parseVkMembersMobile(page, limit);
     }
 
-    const members = Array.from(seen.values()).slice(0, limit);
+    // --- Шаг 2: скроллим модалку и собираем ссылки ---
+
+    // Контейнер со списком внутри модалки. VK обычно оборачивает его в
+    // <div class="ModalPage"> или <div class="sc-...">. Ищем по наличию
+    // элементов с аватарами (img с src="/img/avatar...").
+    const listContainer = modal.locator('div').filter({ has: page.locator('img[src*="avatar"]') }).first();
+
+    const seen = new Set();
+    const members = [];
+    let stagnant = 0;
+    let prevCount = 0;
+
+    for (let round = 0; round < 40 && members.length < limit; round++) {
+      // Собираем все ссылки на профили в видимой области.
+      const hrefs = await page.evaluate(({ navSet }) => {
+        const nav = new Set(navSet);
+        const results = [];
+        // Ищем все <a> внутри модалки.
+        const anchors = Array.from(document.querySelectorAll('a[href]'));
+        for (const a of anchors) {
+          const href = a.getAttribute('href') || '';
+          if (!/^\/(id\d+|[A-Za-z][A-Za-z0-9_.]{2,32})$/.test(href)) continue;
+          if (nav.has(href)) continue;
+          if (/^\/(photos|audios|videos|albums|board|topic|wall|away|login|join|share|dev|faq|about|public|club)/.test(href)) continue;
+          if (!results.includes(href)) results.push(href);
+        }
+        return results;
+      }, { navSet: Array.from(VK_NAV) });
+
+      for (const href of hrefs) {
+        if (!seen.has(href)) {
+          seen.add(href);
+          // Текст ссылки — имя пользователя (или пусто).
+          members.push({ href, name: '' });
+        }
+      }
+
+      // Если новых элементов нет, проверяем ещё один раунд на случай
+      // ленивой загрузки.
+      if (members.length === prevCount) {
+        stagnant++;
+        if (stagnant >= 2) break;
+      } else {
+        stagnant = 0;
+      }
+      prevCount = members.length;
+
+      // Скроллим контейнер. Если контейнер не найден — скроллим всю страницу.
+      if (listContainer && await listContainer.isVisible({ timeout: 1000 }).catch(() => false)) {
+        await listContainer.evaluate((el) => {
+          el.scrollTop += 600;
+        });
+      } else {
+        await humanScroll(page, 1).catch(() => {});
+      }
+
+      // Даем ленивой подгрузке отработать.
+      await humanPause(1500, 3000);
+    }
+
+    // --- Шаг 3: собираём имена из href (VK не всегда показывает name в href) ---
+
+    // Для каждого href пробуем получить имя из data-атрибутов или текста ссылки.
+    const enriched = await page.evaluate((hrefs) => {
+      const results = [];
+      for (const href of hrefs) {
+        const a = Array.from(document.querySelectorAll('a[href]')).find(
+          (el) => el.getAttribute('href') === href
+        );
+        const name = a ? (a.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 80) : '';
+        results.push({ href, name });
+      }
+      return results;
+    }, members.map((m) => m.href));
+
     return {
       ok: true,
       url: page.url(),
       community: name,
-      count: members.length,
-      members,
+      count: enriched.length,
+      members: enriched.slice(0, limit),
     };
   } catch (err) {
     return { error: `${String(err && err.message ? err.message : err)} @ ${page.url()}` };
   }
 }
 
-// Send friend requests from the given profile hrefs, slowly (one by one).
+// Парсинг подписчиков с мобильной версии (f.vk.com / m.vk.com).
+// Используется как fallback, когда десктопная модалка не открывается.
+async function parseVkMembersMobile(page, limit) {
+  const collect = () => page.evaluate(({ navArr }) => {
+    const nav = new Set(navArr);
+    const rows = [];
+    const anchors = Array.from(document.querySelectorAll('a[href]'));
+    for (const a of anchors) {
+      const href = a.getAttribute('href') || '';
+      const text = (a.textContent || '').trim().replace(/\s+/g, ' ');
+      if (!text) continue;
+      if (!/^\/(id\d+|[A-Za-z][A-Za-z0-9_.]{2,32})$/.test(href)) continue;
+      if (nav.has(href)) continue;
+      if (/^\/(photos|audios|videos|albums|board|topic|wall|away|login|join|share|dev|faq|about|public|club)/.test(href)) continue;
+      rows.push({ href, name: text.slice(0, 80) });
+    }
+    return rows;
+  }, { navArr: Array.from(VK_NAV) });
+
+  const seen = new Map();
+  let stagnant = 0;
+  let prev = 0;
+
+  for (let i = 0; i < 30 && seen.size < limit; i++) {
+    const rows = await collect();
+    for (const r of rows) {
+      if (!seen.has(r.href)) seen.set(r.href, r);
+      if (seen.size >= limit) break;
+    }
+
+    if (seen.size === prev) stagnant += 1;
+    else stagnant = 0;
+    prev = seen.size;
+
+    if (stagnant >= 3) break;
+
+    await humanScroll(page, 1).catch(() => {});
+    await humanPause(1200, 2600);
+  }
+
+  return {
+    ok: true,
+    url: page.url(),
+    community: '',
+    count: seen.size,
+    members: Array.from(seen.values()).slice(0, limit),
+  };
+}
+
+// Friend requests are the most bot-shaped action, so gaps are minutes long:
+// sub-minute regularity is the clearest machine signal. Callers may pass
+// minDelayMs/maxDelayMs; the defaults are already the safe human range.
 async function sendVkFriendRequests(page, params) {
   const hrefs = Array.isArray(params.hrefs) ? params.hrefs : [];
-  const minDelay = Math.max(Number(params.minDelayMs) || 45000, 15000);
-  const maxDelay = Math.max(Number(params.maxDelayMs) || 95000, minDelay + 5000);
+  const minDelay = Math.max(Number(params.minDelayMs) || 120000, 60000);
+  const maxDelay = Math.max(Number(params.maxDelayMs) || 360000, minDelay + 30000);
 
   if (hrefs.length === 0) return { error: 'no profile hrefs given' };
 
@@ -492,7 +570,7 @@ async function sendVkFriendRequests(page, params) {
   for (let i = 0; i < hrefs.length; i++) {
     const href = hrefs[i];
     try {
-      await page.goto(`https://m.vk.com${href}`, { waitUntil: 'load' }).catch(() => {});
+      await page.goto(`https://vk.com${href}`, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS }).catch(() => {});
       await page.waitForTimeout(3500);
 
       if (/login/i.test(page.url())) {
@@ -502,9 +580,7 @@ async function sendVkFriendRequests(page, params) {
       await humanScroll(page, 1).catch(() => {});
       await humanPause(800, 2200);
 
-      const bodyText = await page.evaluate(() =>
-        document.body.innerText.replace(/\s+/g, ' ')
-      );
+      const bodyText = await page.evaluate(() => document.body.innerText.replace(/\s+/g, ' '));
 
       if (/Заявка отправлена/.test(bodyText)) {
         results.push({ href, status: 'already_requested' });
@@ -529,9 +605,7 @@ async function sendVkFriendRequests(page, params) {
       }
 
       await humanPause(1500, 3200);
-      const afterText = await page.evaluate(() =>
-        document.body.innerText.replace(/\s+/g, ' ')
-      );
+      const afterText = await page.evaluate(() => document.body.innerText.replace(/\s+/g, ' '));
       results.push({
         href,
         status: /Заявка отправлена/.test(afterText) ? 'sent' : 'sent_unconfirmed',
@@ -556,14 +630,51 @@ async function sendVkFriendRequests(page, params) {
   };
 }
 
-// Community wall post on the desktop UI (verified flow):
-// vk.com/wall-<gid> → «Создать пост» → composer → «Далее» → «Опубликовать».
+async function postVk(page, params) {
+  const target = String(params.targetId || '').trim();
+  if (target) return await postVkCommunity(page, params, target);
+
+  const { content = '', mediaPaths = [] } = params;
+  try {
+    await gotoVk(page, 'https://vk.com/feed', 5000);
+
+    if (/login/i.test(page.url())) {
+      return { error: 'not logged in (session expired) — re-login in the browser', url: page.url() };
+    }
+
+    await humanScroll(page, 1).catch(() => {});
+
+    const composer = page.locator('span[contenteditable="true"][role="textbox"]').first();
+    await composer.waitFor({ state: 'visible', timeout: 30000 });
+
+    await composer.click();
+    await humanPause(500, 1200);
+    await humanType(page, content);
+    await humanPause();
+
+    if (mediaPaths.length > 0) {
+      for (const p of mediaPaths) {
+        await page.locator('input[type="file"]').first().setInputFiles(p).catch(() => {});
+        await humanPause(1500, 3000);
+      }
+    }
+
+    const publishBtn = page.getByText('Опубликовать', { exact: true }).first();
+    await publishBtn.waitFor({ state: 'visible', timeout: 20000 });
+    await publishBtn.click({ timeout: 20000 });
+    await humanPause(2000, 4000);
+
+    return { ok: true, url: page.url() };
+  } catch (err) {
+    return { error: `${String(err && err.message ? err.message : err)} @ ${page.url()}` };
+  }
+}
+
 async function postVkCommunity(page, params, target) {
   const { content = '', mediaPaths = [] } = params;
   const gid = vkNormalize(target).replace(/^-/, '');
   try {
-    await page.goto(`https://vk.com/wall-${gid}`, { waitUntil: 'load' }).catch(() => {});
-    await page.waitForTimeout(4500);
+    await gotoVk(page, `https://vk.com/wall-${gid}`, 4500);
 
     if (/login/i.test(page.url())) {
       return { error: 'not logged in (session expired) — re-login in the browser', url: page.url() };
@@ -603,19 +714,14 @@ async function postVkCommunity(page, params, target) {
 
     return { ok: true, url: page.url(), target: `-${gid}` };
   } catch (err) {
-    return {
-      error: `${String(err && err.message ? err.message : err)} @ ${page.url()}`,
-      target: `-${gid}`,
-    };
+    return { error: `${String(err && err.message ? err.message : err)} @ ${page.url()}`, target: `-${gid}` };
   }
 }
 
-// OK post via the note editor (verified flow):
-// ok.ru/post → .posting_itx editor → «Поделиться».
 async function postOk(page, params) {
   const { content = '', mediaPaths = [] } = params;
   try {
-    await page.goto('https://ok.ru/post', { waitUntil: 'domcontentloaded' }).catch(() => {});
+    await page.goto('https://ok.ru/post', { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS }).catch(() => {});
     await page.waitForTimeout(6000);
 
     if (/login|vkid|account\/login/i.test(page.url())) {
@@ -648,7 +754,12 @@ async function postOk(page, params) {
   }
 }
 
-const handlers = { ping: cmdPing, login: cmdLogin, action: cmdAction };
+// --- Main loop (readline on stdin) ---
+
+const handlers = {
+  ping: cmdPing,
+  action: cmdAction,
+};
 
 const rl = readline.createInterface({ input: process.stdin, terminal: false });
 rl.on('line', async (line) => {
@@ -677,4 +788,5 @@ rl.on('line', async (line) => {
   }
 });
 
-send({ id: null, ok: true, data: { ready: true } });
+// Announce readiness (Rust side waits for this before sending requests).
+send({ id: null, ok: true, data: { ready: true, mode: 'cdp', cdpUrl: CDP_URL } });
