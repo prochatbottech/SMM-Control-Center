@@ -31,6 +31,12 @@ use tauri::Manager;
 /// usual devtools/`chrome://inspect` port stays free.
 pub const CDP_URL: &str = "http://127.0.0.1:9223";
 
+/// Budget for a single browser task. The worker may spend up to 5 minutes of it
+/// waiting for the user to solve a VK captcha in the visible window, so this has
+/// to stay comfortably above that: a task killed mid-captcha both fails and
+/// leaves the browser sitting on the challenge page.
+pub const DEFAULT_ACTION_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// Only one browser action may run at a time: over CDP there is a single context
 /// and a single page, so concurrent tasks would fight over the same tab.
 static ACTION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -61,6 +67,18 @@ fn env_path(name: &str) -> Option<PathBuf> {
         .filter(|p| !p.as_os_str().is_empty())
 }
 
+/// Strip the Windows `\\?\` prefix so the path is a plain `C:\...` string.
+/// Node.js v22+ chokes on `\\?\C:` when it calls `lstat` on a child import
+/// (the string is parsed as a UNC path whose share name is `"C:"`).
+fn normalize_win_path(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(stripped)
+    } else {
+        p.to_path_buf()
+    }
+}
+
 fn env_str(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
@@ -76,17 +94,17 @@ fn script_roots(app: Option<&tauri::AppHandle>) -> Vec<(PathBuf, String)> {
 
     if let Some(app) = app {
         if let Ok(dir) = app.path().resource_dir() {
-            roots.push((dir, "resource".to_string()));
+            roots.push((normalize_win_path(&dir), "resource".to_string()));
         }
     }
 
     if let Ok(cwd) = std::env::current_dir() {
-        roots.push((cwd, "cwd".to_string()));
+        roots.push((normalize_win_path(&cwd), "cwd".to_string()));
     }
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            roots.push((dir.to_path_buf(), "exe".to_string()));
+            roots.push((normalize_win_path(dir), "exe".to_string()));
         }
     }
 
@@ -308,14 +326,22 @@ fn ensure_worker(app: Option<&tauri::AppHandle>) -> Result<(), String> {
             .to_string()
     })?;
 
+    // Tauri's resource_dir()/current_exe() return Windows verbatim paths
+    // (`\\?\C:\...`). Node misparses them: `\\?\C:` looks like a UNC path whose
+    // share is "C:", so `lstat` inside Playwright's import fails with
+    // `EISDIR: illegal operation on a directory, lstat 'C:'` and the worker
+    // dies before answering. Hand plain paths to the child process instead.
     let node = runtime
         .node
         .clone()
         .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "node.exe" } else { "node" }));
 
+    let script = normalize_win_path(script);
+    let node = normalize_win_path(&node);
+
     let mut command = Command::new(&node);
     command
-        .arg(script)
+        .arg(&script)
         .env("SMM_CDP_URL", cdp_url())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -325,7 +351,7 @@ fn ensure_worker(app: Option<&tauri::AppHandle>) -> Result<(), String> {
         .stderr(Stdio::piped());
 
     if let Some(module) = &runtime.playwright_module {
-        command.env("PLAYWRIGHT_MODULE_PATH", module);
+        command.env("PLAYWRIGHT_MODULE_PATH", normalize_win_path(module));
     }
 
     let mut child = command.spawn().map_err(|e| {
@@ -793,7 +819,7 @@ pub fn browser_action(
         platform,
         action,
         params,
-        Duration::from_secs(360),
+        DEFAULT_ACTION_TIMEOUT,
     )
 }
 
@@ -838,7 +864,7 @@ pub fn post(
         },
     });
 
-    let resp = request(app, req, Duration::from_secs(360), true)?;
+    let resp = request(app, req, DEFAULT_ACTION_TIMEOUT, true)?;
 
     if resp.get("ok").and_then(|x| x.as_bool()) != Some(true) {
         return Err(resp
@@ -919,5 +945,23 @@ mod tests {
             summarize_worker_stderr(""),
             "без диагностического вывода"
         );
+    }
+
+    #[test]
+    fn test_normalize_win_path_strips_verbatim_prefix() {
+        // Node parses `\\?\C:` as a UNC path with share "C:", which breaks
+        // Playwright's internal lstat calls. The prefix must be gone.
+        let verbatim = Path::new(r"\\?\C:\Users\potsh\AppData\Local\smm-control-center\automation\worker.mjs");
+        let normalized = normalize_win_path(verbatim);
+        assert_eq!(
+            normalized,
+            PathBuf::from(r"C:\Users\potsh\AppData\Local\smm-control-center\automation\worker.mjs")
+        );
+
+        // Plain and UNC paths are passed through untouched.
+        let plain = Path::new(r"C:\Users\potsh\worker.mjs");
+        assert_eq!(normalize_win_path(plain), plain.to_path_buf());
+        let unc = Path::new(r"\\server\share\worker.mjs");
+        assert_eq!(normalize_win_path(unc), unc.to_path_buf());
     }
 }

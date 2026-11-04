@@ -35,7 +35,14 @@ process.on('uncaughtException', (err) => {
 // --- Configuration ---
 
 const CDP_URL = process.env.SMM_CDP_URL || 'http://127.0.0.1:9223';
-const NAV_TIMEOUT_MS = 45_000;
+
+// Generous on purpose: on a mobile/slow link VK's SPA regularly needs well over
+// 30s, and a timeout in the middle of a run is far more expensive than waiting.
+const NAV_TIMEOUT_MS = 90_000;
+
+// Time the user is given to solve a captcha/checkpoint by hand in the visible
+// browser window before the task gives up.
+const CHALLENGE_WAIT_MS = 300_000;
 
 // --- Playwright loader (works both in dev and packaged layout) ---
 
@@ -159,11 +166,68 @@ async function gotoVk(page, url, settleMs = 4000) {
 function vkChallengeReason(url) {
   const u = String(url || '');
   if (/challenge\.html|checkpoint|show_autosubscribe|\/login/i.test(u)) {
-    return (
-      'VK запросил проверку безопасности (антибот). ' +
-      'Откройте браузер, пройдите проверку вручную и повторите'
-    );
+    return 'captcha';
   }
+  return null;
+}
+
+/**
+ * Wait for the user to solve a captcha/checkpoint in the visible browser.
+ * The browser window is headed (not hidden), so the user can interact with
+ * the challenge dialog directly. Returns the page URL after the challenge
+ * is resolved, or the challenge URL if the user did not act within the
+ * budget.
+ */
+async function waitForCaptchaSolution(page, challengeUrl, budgetMs = CHALLENGE_WAIT_MS) {
+  const deadline = Date.now() + budgetMs;
+  while (Date.now() < deadline) {
+    // Give the user a few seconds between polls so the browser doesn't
+    // thrash with requests.
+    await sleep(3000);
+    const currentUrl = page.url();
+    // If the URL moved away from the challenge page, the user solved it.
+    if (currentUrl !== challengeUrl && !/challenge\.html|checkpoint|show_autosubscribe|\/login/i.test(currentUrl)) {
+      // Small settle pause after solving.
+      await sleep(2000);
+      return { resolved: true, url: currentUrl };
+    }
+    // Also check if the challenge page itself disappeared (user navigated
+    // away manually).
+    try {
+      const body = await page.evaluate(() => document.body.innerText).catch(() => '');
+      if (!body || body.trim().length < 20) {
+        return { resolved: true, url: page.url() };
+      }
+    } catch {
+      // page may have been closed; fall through to timeout path.
+    }
+  }
+  return { resolved: false, url: challengeUrl };
+}
+
+/**
+ * If the page landed on a VK captcha/checkpoint, waits for the user to solve it
+ * by hand in the visible browser. Returns an error object when the challenge is
+ * still unresolved (caller should return it), or null when the page is usable.
+ */
+async function handleVkChallenge(page) {
+  const reason = vkChallengeReason(page.url());
+  if (!reason) return null;
+
+  console.error('[worker] VK captcha/checkpoint detected, waiting for manual solve...');
+  const outcome = await waitForCaptchaSolution(page, page.url());
+
+  if (!outcome.resolved) {
+    return {
+      error:
+        'VK запросил проверку безопасности (антибот). Окно браузера открыто — пройдите ' +
+        'проверку вручную и повторите задачу.',
+      url: outcome.url,
+    };
+  }
+
+  // Solved: the page may need to be reloaded to get the real content.
+  console.error(`[worker] captcha solved, continuing at ${outcome.url}`);
   return null;
 }
 
@@ -335,8 +399,8 @@ async function resolveVkTarget(page, query) {
 
   await gotoVk(page, `https://vk.com/${encodeURIComponent(q)}`, 4500);
 
-  const challenge = vkChallengeReason(page.url());
-  if (challenge) return { error: challenge, url: page.url() };
+  const challengeErr = await handleVkChallenge(page);
+  if (challengeErr) return challengeErr;
 
   const html = await page.content().catch(() => '');
   const mostFrequent = (ids) => {
@@ -381,8 +445,8 @@ async function parseVkMembers(page, params) {
   try {
     await gotoVk(page, `https://vk.com/${encodeURIComponent(name)}`, 5000);
 
-    const challenge = vkChallengeReason(page.url());
-    if (challenge) return { error: challenge, url: page.url() };
+    const challengeErr = await handleVkChallenge(page);
+    if (challengeErr) return challengeErr;
 
     // --- Шаг 1: открываем модалку подписчиков ---
 
@@ -410,9 +474,8 @@ async function parseVkMembers(page, params) {
       // мобильную версию — она стабильнее показывает список участников.
       await gotoVk(page, `https://m.vk.com/${encodeURIComponent(name)}?act=members`, 6000);
 
-      if (/login|challenge/i.test(page.url())) {
-        return { error: `Не удалось получить список участников (URL: ${page.url()})` };
-      }
+      const mobileChallenge = await handleVkChallenge(page);
+      if (mobileChallenge) return mobileChallenge;
 
       // На мобильной версии участники — это ссылки вида /id123 или /username
       // в блоке с классами .section > .page_row.
@@ -573,9 +636,10 @@ async function sendVkFriendRequests(page, params) {
       await page.goto(`https://vk.com${href}`, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS }).catch(() => {});
       await page.waitForTimeout(3500);
 
-      if (/login/i.test(page.url())) {
-        return { error: 'not logged in (session expired) — re-login in the browser', results };
-      }
+      // A challenge mid-batch is worth waiting out: the user is at the window,
+      // and the rest of the queue is still valid once it is solved.
+      const challengeErr = await handleVkChallenge(page);
+      if (challengeErr) return { ...challengeErr, results };
 
       await humanScroll(page, 1).catch(() => {});
       await humanPause(800, 2200);
@@ -638,9 +702,8 @@ async function postVk(page, params) {
   try {
     await gotoVk(page, 'https://vk.com/feed', 5000);
 
-    if (/login/i.test(page.url())) {
-      return { error: 'not logged in (session expired) — re-login in the browser', url: page.url() };
-    }
+    const challengeErr = await handleVkChallenge(page);
+    if (challengeErr) return challengeErr;
 
     await humanScroll(page, 1).catch(() => {});
 
@@ -676,9 +739,8 @@ async function postVkCommunity(page, params, target) {
   try {
     await gotoVk(page, `https://vk.com/wall-${gid}`, 4500);
 
-    if (/login/i.test(page.url())) {
-      return { error: 'not logged in (session expired) — re-login in the browser', url: page.url() };
-    }
+    const challengeErr = await handleVkChallenge(page);
+    if (challengeErr) return { ...challengeErr, target: `-${gid}` };
 
     await humanScroll(page, 1).catch(() => {});
 

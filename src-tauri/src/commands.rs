@@ -501,7 +501,9 @@ pub async fn parse_audience(
             platform,
             "parse_members".to_string(),
             Some(serde_json::json!({ "query": query_for_worker, "limit": limit_value })),
-            std::time::Duration::from_secs(360),
+            // Up to 40 scroll rounds on a slow link, plus the worker's budget for
+            // waiting out a captcha the user solves by hand.
+            std::time::Duration::from_secs(900),
         )
     })
     .await
