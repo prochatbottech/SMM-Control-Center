@@ -295,6 +295,7 @@ export function AudienceView() {
         open={confirmFriends}
         title="Отправить заявки в друзья?"
         description={`Будет отправлено до ${friendLimit} заявок с паузами 2–6 минут между ними — батч займёт столько же. Не закрывайте окно браузера и не пользуйтесь им в это время. Массовые заявки могут привести к ограничению аккаунта VK.`}
+        confirmLabel="Отправить заявки"
         isPending={isSending}
         onConfirm={handleSendFriends}
         onCancel={() => setConfirmFriends(false)}
